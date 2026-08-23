@@ -2,3 +2,6 @@ python-telegram-bot[job-queue]==21.11.1
 httpx==0.28.1
 python-dotenv==1.1.1
 LunarCalendar==0.0.9
+pytz
+PyPDF2==3.0.1
+python-docx==1.1.2

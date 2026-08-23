@@ -39,6 +39,7 @@ from telegram.ext import (
 import db as db_module
 import ton_payment
 import chat_mode
+import file_parser
 
 load_dotenv()
 db_module.init_db()
@@ -860,6 +861,52 @@ async def receive_business_plan(update: Update, context: ContextTypes.DEFAULT_TY
     return QUESTION
 
 
+async def receive_business_plan_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle PDF, Word, or image uploads as business plan input."""
+    assert update.message is not None
+    caption = (update.message.caption or "").strip()
+
+    await update.message.reply_text(
+        "File received. Parsing… / 文件已接收，正在解析…"
+    )
+
+    try:
+        parsed = await file_parser.parse_telegram_file(update, context, caption)
+    except Exception as e:
+        logger.exception("File parsing failed")
+        await update.message.reply_text(
+            f"Failed to parse file / 文件解析失败: {e}\n"
+            "Please send your plan as text / 请直接用文字描述你的商业计划。"
+        )
+        return BUSINESS_PLAN
+
+    if parsed is None:
+        await update.message.reply_text(
+            "Unsupported file type / 不支持的文件格式。\n"
+            "Supported: PDF, Word (.docx), images (JPG/PNG).\n"
+            "Or just type your plan / 或直接用文字描述。"
+        )
+        return BUSINESS_PLAN
+
+    # Combine caption + parsed content
+    plan = parsed
+    if caption and caption not in parsed:
+        plan = f"{caption}\n\n{parsed}"
+
+    if len(plan.strip()) < 10:
+        await update.message.reply_text(
+            "Could not extract enough content. Please add a text description / 内容不足，请补充文字描述。"
+        )
+        return BUSINESS_PLAN
+
+    context.user_data["business_plan"] = plan
+    await update.message.reply_text(
+        "Parsed successfully. What do you want to know?\n解析成功。请选择你想了解的问题：",
+        reply_markup=question_keyboard(),
+    )
+    return QUESTION
+
+
 async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     assert query is not None
@@ -1383,7 +1430,11 @@ def main() -> None:
         states={
             BIRTH: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_birth)],
             BUSINESS_PLAN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_business_plan)
+                MessageHandler(
+                    filters.Document.ALL | filters.PHOTO,
+                    receive_business_plan_file,
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_business_plan),
             ],
             QUESTION: [CallbackQueryHandler(receive_question)],
         },
