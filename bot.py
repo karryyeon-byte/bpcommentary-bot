@@ -8,6 +8,7 @@ then returns a bilingual (English + Chinese) commentary via Together.ai.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -49,10 +50,13 @@ TOGETHER_MODEL: Final[str] = os.getenv(
     "TOGETHER_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 ).strip()
 
-# Pricing
+# Pricing — 50 TON single / 200 TON monthly. Extra on-chain is sponsorship.
 SINGLE_ANALYSIS_TON: Final[float] = float(os.getenv("SINGLE_ANALYSIS_TON", "50"))
 MONTHLY_SUBSCRIPTION_TON: Final[float] = float(os.getenv("MONTHLY_SUBSCRIPTION_TON", "200"))
-PAYMENT_WALLET: Final[str] = os.getenv("TON_PAYMENT_WALLET", "").strip()
+PAYMENT_WALLET: Final[str] = (
+    os.getenv("TON_PAYMENT_WALLET", "").strip()
+    or "UQAW6okaS3s0NxEbv0HW7LVyhmrvUrG-foXlZBB4ace8s334"
+)
 
 BIRTH, BUSINESS_PLAN, QUESTION = range(3)
 
@@ -873,123 +877,86 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = query.message.chat_id if query.message else 0
     user = db_module.get_or_create_user(chat_id)
 
-    # Subscribed users get analysis immediately
-    if user.is_subscribed:
+    # Subscribed or one-shot unlock: generate immediately
+    if user.can_run_deep_audit:
         await query.edit_message_text(
             f"Question / 问题：{QUESTION_LABELS[question_key]}\n\n"
             "Analyzing with BaZi + business commentary…\n"
             "正在结合八字与商业点评进行分析，请稍候…"
         )
-        try:
-            commentary = await generate_commentary(chart, business_plan, question_key)
-        except Exception:
-            logger.exception("Together.ai API call failed")
-            if query.message:
-                await query.message.reply_text(
-                    "Sorry, the commentary service failed. Please try /start again in a moment.\n"
-                    "抱歉，点评服务暂时失败。请稍后重新发送 /start。"
-                )
-            return ConversationHandler.END
-
-        if query.message:
-            for chunk in split_telegram_text(commentary):
-                await query.message.reply_text(chunk)
-            await query.message.reply_text(
-                "Send /start to run another commentary.\n"
-                "发送 /start 可以再做一次点评。"
-            )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    # Not subscribed — require payment before analysis
-    if not PAYMENT_WALLET:
-        # No wallet configured — skip payment (dev mode)
-        await query.edit_message_text(
-            "支付未配置，开发模式直接生成分析。\nPayment not configured, generating in dev mode."
+        await _deliver_deep_audit(
+            context.bot,
+            chat_id,
+            chart,
+            business_plan,
+            question_key,
+            consume_single=not user.is_subscribed,
         )
-        try:
-            commentary = await generate_commentary(chart, business_plan, question_key)
-        except Exception:
-            logger.exception("API call failed")
-        if query.message:
-            for chunk in split_telegram_text(commentary):
-                await query.message.reply_text(chunk)
         context.user_data.clear()
         return ConversationHandler.END
 
-    order_id = ton_payment.generate_order_id(chat_id)
-    db_module.add_payment(chat_id, order_id, SINGLE_ANALYSIS_TON, "single")
-
+    # Unpaid — stash the case file and issue a summons (same memo for 50 / 200)
+    pending = context.application.bot_data.setdefault("pending_reports", {})
+    pending[chat_id] = {
+        "chart": chart,
+        "business_plan": business_plan,
+        "question_key": question_key,
+    }
+    memo = db_module.get_or_create_pending_memo(chat_id, SINGLE_ANALYSIS_TON, "single")
+    if query.message:
+        await query.message.reply_text(
+            _payment_summons_html(SINGLE_ANALYSIS_TON, memo),
+            parse_mode=ParseMode.HTML,
+        )
+        await query.message.reply_text(
+            "缴税核销后，深度审计自动释放。链上巡逻每 10 秒一次。\n"
+            "After the memo matches on-chain, the audit is released. Patrol every 10s."
+        )
     await query.edit_message_text(
-        f"单次深度锐评 / Single Analysis\n\n"
-        f"金额 / Amount: {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON * 1.45:.0f}）\n"
-        f"地址 / Wallet: `{PAYMENT_WALLET}`\n"
-        f"备注 / Memo: `{order_id}`\n\n"
-        f"转账后自动验证（最多5分钟），验证通过立即生成分析。\n"
-        f"Send TON with the memo above. Auto-verified within 5 min, then analysis generated."
+        f"Question / 问题：{QUESTION_LABELS[question_key]}\n案卷已封存。先缴税。"
     )
-
-    # Background task: poll payment, then generate commentary
-    context.application.create_task(
-        _poll_and_analyze(update, context, order_id, chart, business_plan, question_key)
-    )
-    context.user_data.clear()
     return ConversationHandler.END
 
 
-async def _poll_and_analyze(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    order_id: str,
+async def _deliver_deep_audit(
+    bot,
+    chat_id: int,
     chart: BirthChart,
     business_plan: str,
     question_key: str,
-):
-    """Background task: poll for single-analysis payment, then generate commentary."""
-    chat_id = update.effective_chat.id
-    since = int(time.time())
-
-    result = await ton_payment.check_transaction(order_id, SINGLE_ANALYSIS_TON, since)
-    for _ in range(30):  # 30 * 10s = 5 min
-        if result.paid:
-            break
-        await asyncio.sleep(10)
-        result = await ton_payment.check_transaction(order_id, SINGLE_ANALYSIS_TON, since)
-
-    if not result.paid:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏰ 支付超时，未检测到转账。请确认备注和金额，或重新发起 /start。\n"
-                 "Payment timeout. No transaction detected. Check memo and amount, or /start again."
-        )
-        return
-
-    # Payment confirmed
-    db_module.confirm_payment(order_id, result.tx_hash or "", result.sender or "")
-    db_module.increment_analysis_count(chat_id)
-
-    await context.bot.send_message(
+    consume_single: bool,
+) -> None:
+    await bot.send_message(
         chat_id=chat_id,
-        text="✅ 支付成功！正在生成深度锐评…\nPayment confirmed! Generating analysis…"
+        text="深度审计已解锁。正在执刀…\nDeep audit unlocked. Cutting now…",
     )
-
     try:
         commentary = await generate_commentary(chart, business_plan, question_key)
     except Exception:
-        logger.exception("Commentary generation failed after payment")
-        await context.bot.send_message(
+        logger.exception("Together.ai API call failed")
+        await bot.send_message(
             chat_id=chat_id,
-            text="生成失败，请联系管理员退款。\nGeneration failed. Contact admin for refund."
+            text="抱歉，点评服务暂时失败。请稍后重新发送 /start。\n"
+            "Commentary service failed. Send /start again later.",
         )
         return
 
+    db_module.increment_analysis_count(chat_id)
     for chunk in split_telegram_text(commentary):
-        await context.bot.send_message(chat_id=chat_id, text=chunk)
+        await bot.send_message(chat_id=chat_id, text=chunk)
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text="发送 /start 可以再做一次点评。\nSend /start for another analysis."
-    )
+    if consume_single:
+        db_module.consume_single_unlock(chat_id)
+        await bot.send_message(
+            chat_id=chat_id,
+            text="单次权限已销毁。再要审计，重新缴税。\n"
+            "One-shot clearance burned. Pay again for another audit.",
+        )
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="发送 /start 可以再做一次点评。\nSend /start for another analysis.",
+        )
 
 
 async def generate_commentary(
@@ -1101,6 +1068,27 @@ async def _free_strength_analysis(chart: BirthChart) -> str:
 
 # ─── Payment & Subscription ───────────────────────────────────────────────
 
+def _payment_summons_html(amount_ton: float, memo: str) -> str:
+    addr = html.escape(PAYMENT_WALLET)
+    memo_safe = html.escape(memo)
+    amount_safe = html.escape(f"{amount_ton:.1f} $TON")
+    return (
+        "<b>[ PAYMENT SUMMONS / 缴税传票 ]</b>\n"
+        "<i>MORS CERTA, HORA INCERTA</i>\n"
+        "<i>PECUNIA NON OLET</i>\n\n"
+        "<b>ADDRESS (收款地址):</b>\n"
+        f"<code>{addr}</code>\n"
+        "（点击复制）\n\n"
+        "<b>AMOUNT (金额):</b>\n"
+        f"<code>{amount_safe}</code>\n\n"
+        "<b>MEMO (备注码 - 核心!):</b>\n"
+        f"<code>{memo_safe}</code>\n\n"
+        "<b>WARNING (警告):</b>\n"
+        "必须填写备注码！ 漏填、填错导致的资金丢失，概不负责。\n"
+        " Surplus is sponsorship. No refunds."
+    )
+
+
 def _payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1112,13 +1100,13 @@ def _payment_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    f"单次深度锐评 {SINGLE_ANALYSIS_TON} TON",
+                    "单次锐评 50.0 $TON",
                     callback_data="pay_single",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"包月无限对话 {MONTHLY_SUBSCRIPTION_TON} TON/月",
+                    "包月对话 200.0 $TON",
                     callback_data="pay_subscribe",
                 )
             ],
@@ -1126,11 +1114,104 @@ def _payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+async def _issue_summons(
+    bot,
+    chat_id: int,
+    amount_ton: float,
+    payment_type: str,
+) -> str:
+    memo = db_module.get_or_create_pending_memo(chat_id, amount_ton, payment_type)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=_payment_summons_html(amount_ton, memo),
+        parse_mode=ParseMode.HTML,
+    )
+    return memo
+
+
+async def poll_ton_chain(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Every 10 seconds: patrol the static address and match memo + amount."""
+    transfers = await ton_payment.fetch_incoming_transfers()
+    pending_reports: dict = context.application.bot_data.setdefault("pending_reports", {})
+
+    for tx in transfers:
+        if db_module.tx_already_processed(tx.tx_hash):
+            continue
+        payment = db_module.find_pending_memo_in_comment(tx.comment)
+        if not payment:
+            continue
+        tier = ton_payment.classify_amount(tx.amount_ton)
+        if tier is None:
+            logger.info(
+                "Memo matched but amount %.4f TON < 50; ignoring (tx=%s)",
+                tx.amount_ton,
+                tx.tx_hash,
+            )
+            continue
+
+        memo = payment["payment_memo"]
+        chat_id = int(payment["chat_id"])
+        db_module.mark_tx_processed(tx.tx_hash, memo, chat_id, tx.amount_ton)
+        db_module.confirm_payment(
+            memo,
+            tx_hash=tx.tx_hash,
+            sender=tx.sender,
+            actual_amount=tx.amount_ton,
+            payment_type=tier,
+        )
+
+        extra = ""
+        if tier == "single" and tx.amount_ton > SINGLE_ANALYSIS_TON:
+            extra = f"\n多出 {tx.amount_ton - SINGLE_ANALYSIS_TON:.2f} TON 视为赞助，不予退还。"
+        elif tier == "monthly" and tx.amount_ton > MONTHLY_SUBSCRIPTION_TON:
+            extra = f"\n多出 {tx.amount_ton - MONTHLY_SUBSCRIPTION_TON:.2f} TON 视为赞助，不予退还。"
+
+        if tier == "monthly":
+            user = db_module.set_monthly_expiry(chat_id, days=30)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"核销完成。判定：包月用户。\n"
+                    f"到账 {tx.amount_ton:.2f} $TON。expiry_date = 当前时间 + 30 天"
+                    f"（剩余 {user.days_remaining} 天）。无限对话已解锁。{extra}"
+                ),
+            )
+            continue
+
+        db_module.grant_single_unlock(chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"核销完成。判定：单次用户。\n"
+                f"到账 {tx.amount_ton:.2f} $TON。深度审计权限已签发，报告交付后即刻销毁。{extra}"
+            ),
+        )
+        payload = pending_reports.pop(chat_id, None)
+        if payload:
+            await _deliver_deep_audit(
+                context.bot,
+                chat_id,
+                payload["chart"],
+                payload["business_plan"],
+                payload["question_key"],
+                consume_single=True,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="权限已开。现在发送生辰与商业计划，领取深度审计。\nSend /start to file the case.",
+            )
+
+
 async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Initiate subscription payment flow."""
+    """Issue a 200 TON monthly summons; memo is shared with any pending single request."""
     assert update.message is not None
     chat_id = update.message.chat_id
-    user = db_module.get_or_create_user(chat_id, update.message.from_user.username or "", update.message.from_user.first_name or "")
+    user = db_module.get_or_create_user(
+        chat_id,
+        update.message.from_user.username or "",
+        update.message.from_user.first_name or "",
+    )
 
     if user.is_subscribed:
         await update.message.reply_text(
@@ -1139,78 +1220,10 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return ConversationHandler.END
 
-    if not PAYMENT_WALLET:
-        await update.message.reply_text("支付未配置 / Payment not configured.")
-        return ConversationHandler.END
-
-    order_id = ton_payment.generate_subscription_order_id(chat_id)
-    db_module.add_payment(chat_id, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
-
-    await update.message.reply_text(
-        f"包月订阅 / Monthly Subscription\n\n"
-        f"金额 / Amount: {MONTHLY_SUBSCRIPTION_TON} TON\n"
-        f"收款地址 / Wallet: `{PAYMENT_WALLET}`\n"
-        f"备注 / Memo: `{order_id}`\n\n"
-        f"转账后请稍候，系统自动验证（最多5分钟）。\n"
-        f"Send TON with the memo above. Auto-verification within 5 min."
+    await _issue_summons(
+        context.bot, chat_id, MONTHLY_SUBSCRIPTION_TON, "monthly"
     )
-
-    # Poll for payment in background
-    context.user_data["pending_order"] = order_id
-    context.user_data["payment_type"] = "subscription"
-    context.application.create_task(_poll_payment(update, context, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription"))
     return ConversationHandler.END
-
-
-async def _poll_payment(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    order_id: str,
-    amount: float,
-    payment_type: str,
-):
-    """Background task: poll TON blockchain for payment confirmation."""
-    chat_id = update.effective_chat.id
-    since = int(time.time())
-
-    if payment_type == "subscription":
-        result = await ton_payment.check_subscription_payment(chat_id, amount, since)
-    else:
-        result = await ton_payment.check_transaction(order_id, amount, since)
-
-    # Poll for up to 5 minutes
-    for _ in range(30):  # 30 * 10s = 5min
-        if result.paid:
-            break
-        await asyncio.sleep(10)
-        if payment_type == "subscription":
-            result = await ton_payment.check_subscription_payment(chat_id, amount, since)
-        else:
-            result = await ton_payment.check_transaction(order_id, amount, since)
-
-    if result.paid:
-        db_module.confirm_payment(order_id, result.tx_hash or "", result.sender or "")
-        if payment_type == "subscription":
-            db_module.update_user_subscription(chat_id, days=30)
-            user = db_module.get_or_create_user(chat_id)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ 支付成功！包月已激活，剩余 {user.days_remaining} 天。\n"
-                     f"现在可以自由对话了。\n\n"
-                     f"Payment confirmed! Subscription active. {user.days_remaining} days remaining.\n"
-                     f"Chat freely now."
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="✅ 支付成功！请发送 /start 开始分析。\nPayment confirmed! Send /start to begin analysis."
-            )
-    else:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏰ 支付超时，未检测到转账。请确认备注和金额是否正确，或重新发起支付。\n"
-                 "Payment timeout. No transaction detected. Check memo and amount, or try again."
-        )
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1310,36 +1323,41 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     elif data == "pay_single":
-        # Start the normal analysis flow
+        await _issue_summons(context.bot, chat_id, SINGLE_ANALYSIS_TON, "single")
         if query.message:
             await query.message.reply_text(
-                "单次分析 / Single Analysis\n\n"
+                "单次锐评传票已签发（50.0 $TON）。备注码与包月为同一枚。\n"
+                "缴税核销后，发送生辰与商业计划领取深度审计。\n\n"
                 "请按「YYYY-MM-DD HH:MM, 时区, 出生地」发送出生时间。\n"
-                "Send birth date/time: YYYY-MM-DD HH:MM, timezone, location\n\n"
-                "示例 / Example: 1992-08-15 14:30, Asia/Shanghai, 北京"
+                "Example: 1992-08-15 14:30, Asia/Shanghai, 北京"
             )
         return
 
     elif data == "pay_subscribe":
-        order_id = ton_payment.generate_subscription_order_id(chat_id)
-        db_module.add_payment(chat_id, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
-        if query.message:
-            await query.message.reply_text(
-                f"包月订阅 / Monthly Subscription\n\n"
-                f"金额 / Amount: {MONTHLY_SUBSCRIPTION_TON} TON\n"
-                f"地址 / Wallet: `{PAYMENT_WALLET}`\n"
-                f"备注 / Memo: `{order_id}`\n\n"
-                f"转账后自动验证（最多5分钟）。\n"
-                f"Send TON with this memo. Auto-verified within 5 min."
-            )
-        context.application.create_task(
-            _poll_payment(update, context, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
-        )
+        await _issue_summons(context.bot, chat_id, MONTHLY_SUBSCRIPTION_TON, "monthly")
+        return
 
 
 def main() -> None:
     require_config()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    async def post_init(app: Application) -> None:
+        app.bot_data.setdefault("pending_reports", {})
+        jq = app.job_queue
+        if jq is None:
+            logger.error(
+                "JobQueue missing. Install: pip install 'python-telegram-bot[job-queue]'"
+            )
+            return
+        jq.run_repeating(poll_ton_chain, interval=10, first=5, name="ton_patrol")
+        logger.info("TonAPI chain patrol every 10s on %s", PAYMENT_WALLET)
+
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
