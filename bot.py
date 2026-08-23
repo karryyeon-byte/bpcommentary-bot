@@ -543,7 +543,7 @@ def _hidden_and_gods(year_gz: str, month_gz: str, day_gz: str, hour_gz: str) -> 
 def parse_birth_input(text: str) -> BirthChart:
     raw = text.strip()
     match = re.search(
-        r"(?P<y>\d{4})[-/](?P<m>\d{1,2})[-/](?P<d>\d{1,2})[ T](?P<h>\d{1,2}):(?P<min>\d{2})",
+        r"(?P<y>\d{4})[-/](?P<m>\d{1,2})[-/](?P<d>\d{1,2})[ T](?P<h>\d{1,2})[:点](?P<min>\d{2})",
         raw,
     )
     if not match:
@@ -556,13 +556,41 @@ def parse_birth_input(text: str) -> BirthChart:
 
     rest = raw[match.end() :].strip(" ,，;；/")
     parts = [p.strip() for p in re.split(r"[,，;；]+", rest) if p.strip()]
-    tz_token = parts[0] if parts else "Asia/Shanghai"
-    location = parts[1] if len(parts) > 1 else (parts[0] if parts else "")
-    if len(parts) == 1 and _resolve_longitude(parts[0]) is not None and parts[0] not in TZ_ALIASES:
-        # "1992-08-15 14:30, 北京" → timezone default, location 北京
-        if re.search(r"(Asia/|UTC|GMT|[+-]\d)", parts[0], flags=re.I) is None:
-            tz_token = "Asia/Shanghai"
-            location = parts[0]
+
+    tz_token = "Asia/Shanghai"
+    location = ""
+
+    # Pass 1: find explicit timezone markers (Asia/xxx, UTC, GMT, +offset, 北京时间)
+    for part in parts:
+        if re.search(r"(Asia/|UTC|GMT|[+-]\d)", part, flags=re.I) or part in ("北京时间", "中国时间", "国标时间"):
+            tz_token = part
+            break
+
+    # Pass 2: find location (city name in table, or Chinese place name)
+    for part in parts:
+        if part == tz_token:
+            continue
+        if _resolve_longitude(part) is not None or re.search(r"[\u4e00-\u9fff]{2,}", part):
+            location = part
+            break
+
+    # Pass 3: if no location found but there are parts, use the last non-tz part
+    if not location:
+        for part in parts:
+            if part != tz_token:
+                location = part
+                break
+
+    # Edge case: single part that is both a TZ alias and a city name (e.g. "北京")
+    # Treat it as location, since TZ already defaults to Asia/Shanghai
+    if (
+        len(parts) == 1
+        and parts[0] in TZ_ALIASES
+        and _resolve_longitude(parts[0]) is not None
+        and re.search(r"(Asia/|UTC|GMT|[+-]\d)", parts[0], flags=re.I) is None
+    ):
+        tz_token = "Asia/Shanghai"
+        location = parts[0]
 
     tz, tz_name = _resolve_tz(tz_token)
     try:
