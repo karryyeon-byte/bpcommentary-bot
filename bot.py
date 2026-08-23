@@ -7,9 +7,11 @@ then returns a bilingual (English + Chinese) commentary via Together.ai.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -33,7 +35,12 @@ from telegram.ext import (
     filters,
 )
 
+import db as db_module
+import ton_payment
+import chat_mode
+
 load_dotenv()
+db_module.init_db()
 
 TELEGRAM_BOT_TOKEN: Final[str] = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TOGETHER_API_KEY: Final[str] = os.getenv("TOGETHER_API_KEY", "").strip()
@@ -41,6 +48,11 @@ TOGETHER_API_URL: Final[str] = "https://api.together.xyz/v1/chat/completions"
 TOGETHER_MODEL: Final[str] = os.getenv(
     "TOGETHER_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 ).strip()
+
+# Pricing
+SINGLE_ANALYSIS_TON: Final[float] = float(os.getenv("SINGLE_ANALYSIS_TON", "50"))
+MONTHLY_SUBSCRIPTION_TON: Final[float] = float(os.getenv("MONTHLY_SUBSCRIPTION_TON", "200"))
+PAYMENT_WALLET: Final[str] = os.getenv("TON_PAYMENT_WALLET", "").strip()
 
 BIRTH, BUSINESS_PLAN, QUESTION = range(3)
 
@@ -733,15 +745,34 @@ def build_user_prompt(chart: BirthChart, business_plan: str, question_key: str) 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     assert update.message is not None
+    chat_id = update.message.chat_id
+    user = db_module.get_or_create_user(
+        chat_id,
+        update.message.from_user.username or "",
+        update.message.from_user.first_name or "",
+    )
+
+    if user.is_subscribed:
+        await update.message.reply_text(
+            f"欢迎回来 / Welcome back.\n"
+            f"包月剩余 {user.days_remaining} 天，自由对话不限次数。\n"
+            f"{user.days_remaining} days remaining. Chat freely.\n\n"
+            f"直接发消息即可对话。/clear 清空历史。/status 查状态。\n"
+            f"Just send a message. /clear clears history. /status shows status."
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
-        "Welcome to BPCommentary.\n"
-        "欢迎使用 BPCommentary。\n\n"
-        "I will ask three things, then return an English + Chinese commentary.\n"
-        "我会问你三件事，然后给出中英双语点评。\n\n"
-        "First: send your birth date and time as YYYY-MM-DD HH:MM, timezone, location.\n"
-        "首先：请按「YYYY-MM-DD HH:MM, 时区, 出生地」发送出生时间。\n\n"
-        "Example / 示例：1992-08-15 14:30, Asia/Shanghai, 北京\n\n"
-        "Send /cancel anytime to stop. / 随时发送 /cancel 取消。"
+        "BPCommentary — 终极审计官\n\n"
+        "选择 / Choose:\n"
+        f"• 免费排盘 — 四柱+藏干+旺衰判定（引流）\n"
+        f"• 单次深度锐评 {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON*1.45:.0f}）— 完整八字+BP+成长+交叉+生死判定\n"
+        f"• 包月无限对话 {MONTHLY_SUBSCRIPTION_TON} TON/月（约${MONTHLY_SUBSCRIPTION_TON*1.45:.0f}）— 不限次数自由对话\n\n"
+        "Free chart: pillars + hidden stems + strength.\n"
+        "Single: full BaZi + BP + growth + cross + verdict.\n"
+        "Monthly: unlimited free-form chat.\n\n"
+        "请选择 / Please choose:",
+        reply_markup=_payment_keyboard(),
     )
     return BIRTH
 
@@ -764,7 +795,36 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     context.user_data["birth"] = birth
     context.user_data["birth_chart"] = chart
+    context.user_data["birth_chart_text"] = chart.to_user_message()
     await update.message.reply_text(chart.to_user_message())
+
+    # Free chart mode: output only pillars + strength, then upsell
+    if context.user_data.get("mode") == "free_chart":
+        # Generate a brief strength analysis using LLM
+        try:
+            strength_analysis = await _free_strength_analysis(chart)
+            await update.message.reply_text(strength_analysis)
+        except Exception:
+            logger.exception("Free strength analysis failed")
+
+        # Upsell
+        await update.message.reply_text(
+            "以上为免费排盘（四柱+旺衰）。\n\n"
+            "完整深度锐评包含：\n"
+            "• 格局判定（正格/变格/从格）\n"
+            "• 用神忌神（扶抑+调候）\n"
+            "• 大运流年（当前运+未来10年）\n"
+            "• BP商业交叉分析\n"
+            "• 成长经历交叉验证\n"
+            "• 生死判定（天命所归/需要调整/逆天而行）\n\n"
+            f"单次深度锐评：{SINGLE_ANALYSIS_TON} TON\n"
+            f"包月无限对话：{MONTHLY_SUBSCRIPTION_TON} TON/月\n\n"
+            "发送 /start 选择付费方案。",
+            reply_markup=_payment_keyboard(),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "Got it. Now describe your business plan in a few sentences.\n"
         "收到。接下来请用几句话描述你的商业计划。"
@@ -810,34 +870,126 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return ConversationHandler.END
 
+    chat_id = query.message.chat_id if query.message else 0
+    user = db_module.get_or_create_user(chat_id)
+
+    # Subscribed users get analysis immediately
+    if user.is_subscribed:
+        await query.edit_message_text(
+            f"Question / 问题：{QUESTION_LABELS[question_key]}\n\n"
+            "Analyzing with BaZi + business commentary…\n"
+            "正在结合八字与商业点评进行分析，请稍候…"
+        )
+        try:
+            commentary = await generate_commentary(chart, business_plan, question_key)
+        except Exception:
+            logger.exception("Together.ai API call failed")
+            if query.message:
+                await query.message.reply_text(
+                    "Sorry, the commentary service failed. Please try /start again in a moment.\n"
+                    "抱歉，点评服务暂时失败。请稍后重新发送 /start。"
+                )
+            return ConversationHandler.END
+
+        if query.message:
+            for chunk in split_telegram_text(commentary):
+                await query.message.reply_text(chunk)
+            await query.message.reply_text(
+                "Send /start to run another commentary.\n"
+                "发送 /start 可以再做一次点评。"
+            )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # Not subscribed — require payment before analysis
+    if not PAYMENT_WALLET:
+        # No wallet configured — skip payment (dev mode)
+        await query.edit_message_text(
+            "支付未配置，开发模式直接生成分析。\nPayment not configured, generating in dev mode."
+        )
+        try:
+            commentary = await generate_commentary(chart, business_plan, question_key)
+        except Exception:
+            logger.exception("API call failed")
+        if query.message:
+            for chunk in split_telegram_text(commentary):
+                await query.message.reply_text(chunk)
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    order_id = ton_payment.generate_order_id(chat_id)
+    db_module.add_payment(chat_id, order_id, SINGLE_ANALYSIS_TON, "single")
+
     await query.edit_message_text(
-        f"Question / 问题：{QUESTION_LABELS[question_key]}\n\n"
-        "Analyzing with BaZi + business commentary…\n"
-        "正在结合八字与商业点评进行分析，请稍候…"
+        f"单次深度锐评 / Single Analysis\n\n"
+        f"金额 / Amount: {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON * 1.45:.0f}）\n"
+        f"地址 / Wallet: `{PAYMENT_WALLET}`\n"
+        f"备注 / Memo: `{order_id}`\n\n"
+        f"转账后自动验证（最多5分钟），验证通过立即生成分析。\n"
+        f"Send TON with the memo above. Auto-verified within 5 min, then analysis generated."
+    )
+
+    # Background task: poll payment, then generate commentary
+    context.application.create_task(
+        _poll_and_analyze(update, context, order_id, chart, business_plan, question_key)
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def _poll_and_analyze(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    order_id: str,
+    chart: BirthChart,
+    business_plan: str,
+    question_key: str,
+):
+    """Background task: poll for single-analysis payment, then generate commentary."""
+    chat_id = update.effective_chat.id
+    since = int(time.time())
+
+    result = await ton_payment.check_transaction(order_id, SINGLE_ANALYSIS_TON, since)
+    for _ in range(30):  # 30 * 10s = 5 min
+        if result.paid:
+            break
+        await asyncio.sleep(10)
+        result = await ton_payment.check_transaction(order_id, SINGLE_ANALYSIS_TON, since)
+
+    if not result.paid:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏰ 支付超时，未检测到转账。请确认备注和金额，或重新发起 /start。\n"
+                 "Payment timeout. No transaction detected. Check memo and amount, or /start again."
+        )
+        return
+
+    # Payment confirmed
+    db_module.confirm_payment(order_id, result.tx_hash or "", result.sender or "")
+    db_module.increment_analysis_count(chat_id)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="✅ 支付成功！正在生成深度锐评…\nPayment confirmed! Generating analysis…"
     )
 
     try:
         commentary = await generate_commentary(chart, business_plan, question_key)
     except Exception:
-        logger.exception("Together.ai API call failed")
-        if query.message:
-            await query.message.reply_text(
-                "Sorry, the commentary service failed. Please try /start again in a moment.\n"
-                "抱歉，点评服务暂时失败。请稍后重新发送 /start。"
-            )
-        return ConversationHandler.END
-
-    if query.message:
-        for chunk in split_telegram_text(commentary):
-            await query.message.reply_text(chunk)
-
-        await query.message.reply_text(
-            "Send /start to run another commentary.\n"
-            "发送 /start 可以再做一次点评。"
+        logger.exception("Commentary generation failed after payment")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="生成失败，请联系管理员退款。\nGeneration failed. Contact admin for refund."
         )
+        return
 
-    context.user_data.clear()
-    return ConversationHandler.END
+    for chunk in split_telegram_text(commentary):
+        await context.bot.send_message(chat_id=chat_id, text=chunk)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="发送 /start 可以再做一次点评。\nSend /start for another analysis."
+    )
 
 
 async def generate_commentary(
@@ -888,13 +1040,300 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if update.message:
         await update.message.reply_text(
             "BPCommentary_bot\n\n"
-            "/start — begin a new commentary\n"
-            "/cancel — stop the current flow\n"
+            "/start — begin / check status\n"
+            "/subscribe — monthly subscription (unlimited chat)\n"
+            "/status — check your subscription\n"
+            "/clear — clear chat history\n"
+            "/cancel — stop current flow\n"
             "/help — this message\n\n"
-            "You will be asked for:\n"
-            "1) Birth date and time as YYYY-MM-DD HH:MM, timezone, location (BaZi)\n"
-            "2) A short business plan\n"
-            "3) Fit / timing / risks"
+            "Subscribed users: chat freely. Non-subscribers: pay per analysis or subscribe."
+        )
+
+
+# ─── Free Chart (strength only) ───────────────────────────────────────────
+
+FREE_STRENGTH_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
+This is a FREE tier output — you ONLY analyze 旺衰 (day master strength).
+Do NOT analyze 格局, 用神, 大运, BP, or give final verdicts. Those are paid.
+
+Rules:
+- Reply in Chinese first, then English translation.
+- Based on the pre-computed chart below.
+- Analyze: 根气(禄/刃/库), 合局/会局, 月令, 透干, 燥湿, 开库.
+- Conclude: 身强 / 身弱 / 中和偏强 / 中和偏弱 / 暗涌型身强.
+- Give reasoning, not just conclusion.
+- At the end, add exactly: "完整格局/用神/大运/BP交叉/生死判定需付费解锁。"
+- Keep it tight: 3-5 paragraphs max.
+"""
+
+
+async def _free_strength_analysis(chart: BirthChart) -> str:
+    """Lightweight LLM call: only analyze day master strength (free tier)."""
+    messages = [
+        {"role": "system", "content": FREE_STRENGTH_PROMPT},
+        {"role": "user", "content": f"Pre-computed chart:\n{chart.to_user_message()}\n\nAnalyze 旺衰 only."},
+    ]
+    payload = {
+        "model": TOGETHER_MODEL,
+        "max_tokens": 1024,
+        "messages": messages,
+    }
+    headers = {
+        "Authorization": f"Bearer {TOGETHER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+    text = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    if isinstance(text, list):
+        text = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in text
+        )
+    return (text or "").strip() or "旺衰分析生成失败。"
+
+
+# ─── Payment & Subscription ───────────────────────────────────────────────
+
+def _payment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "免费排盘（四柱+旺衰）",
+                    callback_data="free_chart",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"单次深度锐评 {SINGLE_ANALYSIS_TON} TON",
+                    callback_data="pay_single",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    f"包月无限对话 {MONTHLY_SUBSCRIPTION_TON} TON/月",
+                    callback_data="pay_subscribe",
+                )
+            ],
+        ]
+    )
+
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Initiate subscription payment flow."""
+    assert update.message is not None
+    chat_id = update.message.chat_id
+    user = db_module.get_or_create_user(chat_id, update.message.from_user.username or "", update.message.from_user.first_name or "")
+
+    if user.is_subscribed:
+        await update.message.reply_text(
+            f"你已经是包月用户，剩余 {user.days_remaining} 天。\n"
+            f"You're already subscribed. {user.days_remaining} days remaining."
+        )
+        return ConversationHandler.END
+
+    if not PAYMENT_WALLET:
+        await update.message.reply_text("支付未配置 / Payment not configured.")
+        return ConversationHandler.END
+
+    order_id = ton_payment.generate_subscription_order_id(chat_id)
+    db_module.add_payment(chat_id, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
+
+    await update.message.reply_text(
+        f"包月订阅 / Monthly Subscription\n\n"
+        f"金额 / Amount: {MONTHLY_SUBSCRIPTION_TON} TON\n"
+        f"收款地址 / Wallet: `{PAYMENT_WALLET}`\n"
+        f"备注 / Memo: `{order_id}`\n\n"
+        f"转账后请稍候，系统自动验证（最多5分钟）。\n"
+        f"Send TON with the memo above. Auto-verification within 5 min."
+    )
+
+    # Poll for payment in background
+    context.user_data["pending_order"] = order_id
+    context.user_data["payment_type"] = "subscription"
+    context.application.create_task(_poll_payment(update, context, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription"))
+    return ConversationHandler.END
+
+
+async def _poll_payment(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    order_id: str,
+    amount: float,
+    payment_type: str,
+):
+    """Background task: poll TON blockchain for payment confirmation."""
+    chat_id = update.effective_chat.id
+    since = int(time.time())
+
+    if payment_type == "subscription":
+        result = await ton_payment.check_subscription_payment(chat_id, amount, since)
+    else:
+        result = await ton_payment.check_transaction(order_id, amount, since)
+
+    # Poll for up to 5 minutes
+    for _ in range(30):  # 30 * 10s = 5min
+        if result.paid:
+            break
+        await asyncio.sleep(10)
+        if payment_type == "subscription":
+            result = await ton_payment.check_subscription_payment(chat_id, amount, since)
+        else:
+            result = await ton_payment.check_transaction(order_id, amount, since)
+
+    if result.paid:
+        db_module.confirm_payment(order_id, result.tx_hash or "", result.sender or "")
+        if payment_type == "subscription":
+            db_module.update_user_subscription(chat_id, days=30)
+            user = db_module.get_or_create_user(chat_id)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ 支付成功！包月已激活，剩余 {user.days_remaining} 天。\n"
+                     f"现在可以自由对话了。\n\n"
+                     f"Payment confirmed! Subscription active. {user.days_remaining} days remaining.\n"
+                     f"Chat freely now."
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="✅ 支付成功！请发送 /start 开始分析。\nPayment confirmed! Send /start to begin analysis."
+            )
+    else:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏰ 支付超时，未检测到转账。请确认备注和金额是否正确，或重新发起支付。\n"
+                 "Payment timeout. No transaction detected. Check memo and amount, or try again."
+        )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    chat_id = update.message.chat_id
+    user = db_module.get_or_create_user(chat_id, update.message.from_user.username or "", update.message.from_user.first_name or "")
+
+    if user.is_subscribed:
+        text = (
+            f"📊 订阅状态 / Subscription Status\n\n"
+            f"状态: ✅ 包月中 / Active\n"
+            f"剩余: {user.days_remaining} 天 / days\n"
+            f"累计分析: {user.analysis_count} 次\n"
+            f"累计支付: {user.total_paid_ton:.2f} TON"
+        )
+    else:
+        text = (
+            f"📊 订阅状态 / Subscription Status\n\n"
+            f"状态: ❌ 未订阅 / Inactive\n"
+            f"累计分析: {user.analysis_count} 次\n"
+            f"累计支付: {user.total_paid_ton:.2f} TON\n\n"
+            f"发送 /subscribe 开通包月，自由对话不限次数。\n"
+            f"Send /subscribe for unlimited monthly chat."
+        )
+    await update.message.reply_text(text)
+
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    chat_id = update.message.chat_id
+    db_module.clear_chat_history(chat_id)
+    await update.message.reply_text("对话历史已清空 / Chat history cleared.")
+
+
+# ─── Free Chat Mode (subscribed users) ────────────────────────────────────
+
+async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle messages from subscribed users — free-form LLM chat."""
+    assert update.message is not None
+    chat_id = update.message.chat_id
+    user_msg = update.message.text or ""
+
+    user = db_module.get_or_create_user(chat_id)
+    if not user.is_subscribed:
+        # Not subscribed — offer payment
+        await update.message.reply_text(
+            "未订阅用户请先支付 / Not subscribed. Please pay first:\n",
+            reply_markup=_payment_keyboard(),
+        )
+        return
+
+    # Save user message
+    db_module.add_chat_message(chat_id, "user", user_msg)
+
+    # Get history (last 20 messages)
+    history = db_module.get_chat_history(chat_id, limit=20)
+    # Remove the last user message (we just added it, will append separately)
+    history = history[:-1] if history else []
+
+    # Get birth chart if stored
+    birth_chart = context.user_data.get("birth_chart_text", "")
+
+    try:
+        reply = await chat_mode.chat_reply(user_msg, history, birth_chart)
+    except Exception as e:
+        logger.exception("Chat mode failed")
+        reply = f"服务暂时不可用 / Service temporarily unavailable: {e}"
+
+    # Save assistant reply
+    db_module.add_chat_message(chat_id, "assistant", reply)
+
+    # Send (split if too long)
+    for chunk in split_telegram_text(reply):
+        await update.message.reply_text(chunk)
+
+
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline payment button clicks."""
+    query = update.callback_query
+    assert query is not None
+    await query.answer()
+
+    chat_id = query.message.chat_id if query.message else 0
+    data = query.data or ""
+
+    if data == "free_chart":
+        context.user_data["mode"] = "free_chart"
+        if query.message:
+            await query.message.reply_text(
+                "免费排盘 / Free Chart\n\n"
+                "请按「YYYY-MM-DD HH:MM, 时区, 出生地」发送出生时间。\n"
+                "Send birth date/time: YYYY-MM-DD HH:MM, timezone, location\n\n"
+                "示例 / Example: 1992-08-15 14:30, Asia/Shanghai, 北京\n\n"
+                "免费版输出：四柱 + 藏干 + 十神 + 旺衰判定。\n"
+                "完整格局/用神/大运/BP交叉/生死判定需单次深度锐评或包月解锁。"
+            )
+        return
+
+    elif data == "pay_single":
+        # Start the normal analysis flow
+        if query.message:
+            await query.message.reply_text(
+                "单次分析 / Single Analysis\n\n"
+                "请按「YYYY-MM-DD HH:MM, 时区, 出生地」发送出生时间。\n"
+                "Send birth date/time: YYYY-MM-DD HH:MM, timezone, location\n\n"
+                "示例 / Example: 1992-08-15 14:30, Asia/Shanghai, 北京"
+            )
+        return
+
+    elif data == "pay_subscribe":
+        order_id = ton_payment.generate_subscription_order_id(chat_id)
+        db_module.add_payment(chat_id, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
+        if query.message:
+            await query.message.reply_text(
+                f"包月订阅 / Monthly Subscription\n\n"
+                f"金额 / Amount: {MONTHLY_SUBSCRIPTION_TON} TON\n"
+                f"地址 / Wallet: `{PAYMENT_WALLET}`\n"
+                f"备注 / Memo: `{order_id}`\n\n"
+                f"转账后自动验证（最多5分钟）。\n"
+                f"Send TON with this memo. Auto-verified within 5 min."
+            )
+        context.application.create_task(
+            _poll_payment(update, context, order_id, MONTHLY_SUBSCRIPTION_TON, "subscription")
         )
 
 
@@ -918,6 +1357,12 @@ def main() -> None:
     application.add_handler(conversation)
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(CommandHandler("subscribe", subscribe_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart)"))
+    # Free chat handler for subscribed users (must be AFTER conversation handler)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_chat_handler))
 
     logger.info("BPCommentary_bot is polling")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
