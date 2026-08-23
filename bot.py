@@ -57,6 +57,10 @@ PAYMENT_WALLET: Final[str] = (
     os.getenv("TON_PAYMENT_WALLET", "").strip()
     or "UQAW6okaS3s0NxEbv0HW7LVyhmrvUrG-foXlZBB4ace8s334"
 )
+# Admin chat IDs bypass payment (comma-separated). Get your ID from @userinfobot
+ADMIN_IDS: Final[frozenset[int]] = frozenset(
+    int(x) for x in os.getenv("ADMIN_CHAT_IDS", "").split(",") if x.strip().isdigit()
+)
 
 BIRTH, BUSINESS_PLAN, QUESTION = range(3)
 
@@ -877,6 +881,19 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = query.message.chat_id if query.message else 0
     user = db_module.get_or_create_user(chat_id)
 
+    # Admin bypass: skip payment for developer accounts
+    if chat_id in ADMIN_IDS:
+        await query.edit_message_text(
+            f"Question / 问题：{QUESTION_LABELS[question_key]}\n\n"
+            "🔧 管理员模式，跳过支付 / Admin mode, payment bypassed\n\n"
+            "Analyzing… 正在分析…"
+        )
+        await _deliver_deep_audit(
+            context.bot, chat_id, chart, business_plan, question_key, consume_single=False
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     # Subscribed or one-shot unlock: generate immediately
     if user.can_run_deep_audit:
         await query.edit_message_text(
@@ -1267,7 +1284,7 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_msg = update.message.text or ""
 
     user = db_module.get_or_create_user(chat_id)
-    if not user.is_subscribed:
+    if not user.is_subscribed and chat_id not in ADMIN_IDS:
         # Not subscribed — offer payment
         await update.message.reply_text(
             "未订阅用户请先支付 / Not subscribed. Please pay first:\n",
