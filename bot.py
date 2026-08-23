@@ -804,6 +804,8 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data["birth"] = birth
     context.user_data["birth_chart"] = chart
     context.user_data["birth_chart_text"] = chart.to_user_message()
+    # Persist to DB so free chat remembers the chart across sessions
+    db_module.save_birth_chart(update.message.chat_id, chart.to_user_message())
     await update.message.reply_text(chart.to_user_message())
 
     # Free chart mode: output only pillars + strength, then upsell
@@ -1300,8 +1302,8 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Remove the last user message (we just added it, will append separately)
     history = history[:-1] if history else []
 
-    # Get birth chart if stored
-    birth_chart = context.user_data.get("birth_chart_text", "")
+    # Get birth chart from DB (persisted across sessions/restarts)
+    birth_chart = user.birth_chart_text or context.user_data.get("birth_chart_text", "")
 
     try:
         reply = await chat_mode.chat_reply(user_msg, history, birth_chart)

@@ -87,6 +87,7 @@ def init_db() -> None:
         )
         _ensure_column(conn, "users", "expiry_date", "INTEGER DEFAULT 0")
         _ensure_column(conn, "users", "single_unlock", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "users", "birth_chart_text", "TEXT DEFAULT ''")
         _ensure_column(conn, "payments", "payment_memo", "TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_memo "
@@ -113,6 +114,7 @@ class User:
     analysis_count: int
     expiry_date: int = 0
     single_unlock: int = 0
+    birth_chart_text: str = ""
 
     @property
     def is_subscribed(self) -> bool:
@@ -147,6 +149,7 @@ def _user_from_row(row: sqlite3.Row) -> User:
         analysis_count=data.get("analysis_count") or 0,
         expiry_date=data.get("expiry_date") or 0,
         single_unlock=data.get("single_unlock") or 0,
+        birth_chart_text=data.get("birth_chart_text") or "",
     )
 
 
@@ -161,6 +164,15 @@ def get_or_create_user(chat_id: int, username: str = "", first_name: str = "") -
             )
             row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         return _user_from_row(row)
+
+
+def save_birth_chart(chat_id: int, chart_text: str) -> None:
+    """Persist birth chart text so it survives restarts and new conversations."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET birth_chart_text = ? WHERE chat_id = ?",
+            (chart_text, chat_id),
+        )
 
 
 def set_monthly_expiry(chat_id: int, days: int = 30) -> User:
