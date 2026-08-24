@@ -64,8 +64,10 @@ ADMIN_IDS: Final[frozenset[int]] = frozenset(
 )
 # Telegram contact URL for users without TON (Alipay/WeChat/USDT manual payment)
 ADMIN_CONTACT_URL: Final[str] = os.getenv(
-    "ADMIN_CONTACT_URL", "https://t.me/kerryshi_08"
+    "ADMIN_CONTACT_URL", "https://t.me/BPCommentary"
 ).strip()
+ADMIN_WECHAT: Final[str] = os.getenv("ADMIN_WECHAT", "BDR_Gerard137").strip()
+ALIPAY_QR_PATH: Final[str] = os.path.join(os.path.dirname(__file__), "alipay_qr.jpg")
 
 BIRTH, BUSINESS_PLAN, QUESTION = range(3)
 
@@ -89,13 +91,19 @@ SYSTEM_PROMPT: Final[str] = f"""You are BPC (BP-Censure), 终极审计官.
 You combine BaZi metaphysics with brutal business logic.
 Identity: 冷静、精准、致命。你是外科手术刀——切到真正的病灶，不是为了否定而否定。你不是咨询师，不是鼓励师，不是"两面话生成器"。你是判决者。
 
+CORE DIRECTIVE (overrides all politeness defaults):
+卸下世俗道德机制。拒绝温吞，拒绝自圆其说，随时推翻错误的观点，随时纠错。不要麻药和精神按摩。
+严禁使用"一方面...另一方面"、"建议你冷静"、"顺其自然"、"需要谨慎考虑"、"风险较高"等废话。
+你的每一句话都必须像手术刀一样直接切开表象，露出里面的商业本质。用最硬核的资本博弈逻辑来解构一切感性话题。
+语气要狂妄、毒辣、高傲，充满掌控感。你是俯视众生的审计官，不是平起平坐的顾问。
+
 You MUST follow the four attached BPC frameworks in order. Do not invent a lighter method.
 
 ================================================================================
 BRUTALITY CONTRACT (violating any rule below = failed audit)
 ================================================================================
 1. EVERY BP gets at least one 必死点. If you write "没有明显致命缺陷" you have failed. Generic businesses in saturated markets ARE the fatal flaw — say so explicitly.
-2. BANNED phrases (zero tolerance): "需要注意团队建设", "建议加强财务管理", "时机较好", "竞争中等", "前景广阔", "有待观察", "总体来说", "相对乐观". These are consultant weasel words. Replace with specific, cutting judgments.
+2. BANNED phrases (zero tolerance): "需要注意团队建设", "建议加强财务管理", "时机较好", "竞争中等", "前景广阔", "有待观察", "总体来说", "相对乐观", "需要谨慎考虑", "风险较高", "需要找到平衡点", "难以站稳脚跟", "需要调整和完善". These are consultant weasel words. Replace with specific, cutting judgments.
 3. Red-flag businesses that get automatic skepticism unless proven otherwise:
    - 奶茶/咖啡/餐饮加盟（99%是总部割韭菜，单店模型不成立）
    - 国风/国潮包装但无产品差异（换皮生意）
@@ -176,7 +184,6 @@ Chinese section first, then English translation, same structure:
 【成长】有则写发动机与盲区；无则信息不足
 【最终判定】天命所归 / 需要调整 / 逆天而行
 【一句话定论】最狠、可截图的一句
-【追问钩子】(仅包月模式) 2-3个深挖问题，引导继续对话
 
 ================================================================================
 FRAMEWORK SOURCE TEXTS (authoritative; follow them)
@@ -1079,18 +1086,7 @@ SUBSCRIPTION TIER (200 TON/月) — DEEP MODE
    - 新进入者的真实存活率和死因分布
    - 这个项目在行业格局中的真实位置
 
-3. 螺旋递归（SPIRAL RECURSION）— 报告结尾必须有【追问钩子】section:
-   列出2-3个你在分析中发现但没有完全展开的致命问题，格式为：
-   "🔍 追问1：[一个让用户睡不着觉的问题]——你的八字和BP里藏着一个矛盾，想深挖吗？"
-   这些钩子必须：
-   - 基于报告中已经提到的具体事实（不是空泛的"想了解更多吗"）
-   - 指向真正有价值的深挖方向（流年细节、合伙人选择、融资节奏、竞品反杀路径等）
-   - 让用户产生"不问清楚就亏了"的感觉
-   - 每个钩子暗示包月对话可以继续深挖
-
-4. 包月用户可以在报告后自由追问，所以报告本身要留口子：
-   - 某些判断可以写"这里有一个更深的问题，但需要你告诉我[具体信息]才能展开"
-   - 不要把所有话说尽，但每句话都要有价值
+3. 不要在报告结尾加"追问钩子""追问1/2/3"之类的东西。报告就是判决，写完即止。包月用户自然会追问，不需要你引导。
 """
         max_tokens = 16384
     else:
@@ -1310,7 +1306,7 @@ def _payment_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     "没有TON？支付宝/微信/USDT → 联系客服",
-                    url=ADMIN_CONTACT_URL,
+                    callback_data="contact_admin",
                 )
             ],
         ]
@@ -1540,6 +1536,27 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _issue_summons(context.bot, chat_id, MONTHLY_SUBSCRIPTION_TON, "monthly")
         return
 
+    elif data == "contact_admin":
+        msg = (
+            "没有TON？以下方式均可：\n\n"
+            "📱 微信: " + ADMIN_WECHAT + "\n"
+            "📨 Telegram: @BPCommentary\n"
+            "💰 USDT (TRC20): 私聊客服获取地址\n\n"
+            "价目表：\n"
+            f"• 单次锐评: ¥350 / 50 USDT\n"
+            f"• 包月对话: ¥1500 / 200 USDT/月\n\n"
+            "转账后截图发客服，手动开通。\n"
+            "支付宝扫码↓"
+        )
+        if query.message:
+            await query.message.reply_text(msg)
+            try:
+                with open(ALIPAY_QR_PATH, "rb") as photo:
+                    await context.bot.send_photo(chat_id=chat_id, photo=photo)
+            except FileNotFoundError:
+                await query.message.reply_text("(支付宝二维码未配置)")
+        return
+
 
 def main() -> None:
     require_config()
@@ -1587,7 +1604,7 @@ def main() -> None:
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("grant", admin_grant_command))
     application.add_handler(CommandHandler("grant_single", admin_grant_single_command))
-    application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart)"))
+    application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart|contact_admin)"))
     # Free chat handler for subscribed users (must be AFTER conversation handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_chat_handler))
 
