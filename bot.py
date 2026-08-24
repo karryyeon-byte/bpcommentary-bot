@@ -62,6 +62,10 @@ PAYMENT_WALLET: Final[str] = (
 ADMIN_IDS: Final[frozenset[int]] = frozenset(
     int(x) for x in os.getenv("ADMIN_CHAT_IDS", "").split(",") if x.strip().isdigit()
 )
+# Telegram contact URL for users without TON (Alipay/WeChat/USDT manual payment)
+ADMIN_CONTACT_URL: Final[str] = os.getenv(
+    "ADMIN_CONTACT_URL", "https://t.me/kerryshi_08"
+).strip()
 
 BIRTH, BUSINESS_PLAN, QUESTION = range(3)
 
@@ -1162,6 +1166,54 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+async def admin_grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only: /grant <chat_id> [days] — manually activate subscription."""
+    if not update.message or update.message.chat_id not in ADMIN_IDS:
+        if update.message:
+            await update.message.reply_text("无权使用 / Admin only.")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "用法 / Usage: /grant <chat_id> [days]\n"
+            "示例: /grant 123456789 30"
+        )
+        return
+    try:
+        target_id = int(args[0])
+        days = int(args[1]) if len(args) > 1 else 30
+    except ValueError:
+        await update.message.reply_text("chat_id和days必须是数字。")
+        return
+    db_module.update_user_subscription(target_id, days=days)
+    await update.message.reply_text(
+        f"✅ 已开通 / Granted: {target_id}\n"
+        f"时长 / Duration: {days} 天/days\n"
+        f"类型 / Type: 包月无限对话 (subscription)"
+    )
+
+
+async def admin_grant_single_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only: /grant_single <chat_id> — manually grant one deep audit."""
+    if not update.message or update.message.chat_id not in ADMIN_IDS:
+        if update.message:
+            await update.message.reply_text("无权使用 / Admin only.")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("用法 / Usage: /grant_single <chat_id>")
+        return
+    try:
+        target_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("chat_id必须是数字。")
+        return
+    db_module.grant_single_unlock(target_id)
+    await update.message.reply_text(
+        f"✅ 已授予单次锐评 / Single audit granted: {target_id}"
+    )
+
+
 # ─── Free Chart (strength only) ───────────────────────────────────────────
 
 FREE_STRENGTH_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
@@ -1245,14 +1297,20 @@ def _payment_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "单次锐评 50.0 $TON",
+                    f"单次锐评 {SINGLE_ANALYSIS_TON} $TON",
                     callback_data="pay_single",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "包月对话 200.0 $TON",
+                    f"包月对话 {MONTHLY_SUBSCRIPTION_TON} $TON/月",
                     callback_data="pay_subscribe",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "没有TON？支付宝/微信/USDT → 联系客服",
+                    url=ADMIN_CONTACT_URL,
                 )
             ],
         ]
@@ -1527,6 +1585,8 @@ def main() -> None:
     application.add_handler(CommandHandler("subscribe", subscribe_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("clear", clear_command))
+    application.add_handler(CommandHandler("grant", admin_grant_command))
+    application.add_handler(CommandHandler("grant_single", admin_grant_single_command))
     application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart)"))
     # Free chat handler for subscribed users (must be AFTER conversation handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_chat_handler))
