@@ -14,7 +14,7 @@ import httpx
 TOGETHER_API_KEY: Final[str] = os.getenv("TOGETHER_API_KEY", "").strip()
 TOGETHER_API_URL: Final[str] = "https://api.together.xyz/v1/chat/completions"
 TOGETHER_MODEL: Final[str] = os.getenv(
-    "TOGETHER_MODEL", "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    "TOGETHER_MODEL", "deepseek-ai/DeepSeek-V3"
 ).strip()
 
 CHAT_SYSTEM_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
