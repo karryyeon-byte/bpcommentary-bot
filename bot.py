@@ -172,6 +172,7 @@ Chinese section first, then English translation, same structure:
 【成长】有则写发动机与盲区；无则信息不足
 【最终判定】天命所归 / 需要调整 / 逆天而行
 【一句话定论】最狠、可截图的一句
+【追问钩子】(仅包月模式) 2-3个深挖问题，引导继续对话
 
 ================================================================================
 FRAMEWORK SOURCE TEXTS (authoritative; follow them)
@@ -855,8 +856,10 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "Got it. Now describe your business plan in a few sentences.\n"
-        "收到。接下来请用几句话描述你的商业计划。"
+        "把你的BP和产品图发来。PDF、Word、图片都行。\n"
+        "Send your BP and product images. PDF, Word, images — all accepted.\n\n"
+        "接受审判吧。我不会像温吞的导师那样给你和稀泥。\n"
+        "Face the verdict. I don't do polite encouragement."
     )
     return BUSINESS_PLAN
 
@@ -956,7 +959,8 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Analyzing… 正在分析…"
         )
         await _deliver_deep_audit(
-            context.bot, chat_id, chart, business_plan, question_key, consume_single=False
+            context.bot, chat_id, chart, business_plan, question_key,
+            consume_single=False, is_subscribed=True,
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -975,6 +979,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             business_plan,
             question_key,
             consume_single=not user.is_subscribed,
+            is_subscribed=user.is_subscribed,
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -1009,13 +1014,15 @@ async def _deliver_deep_audit(
     business_plan: str,
     question_key: str,
     consume_single: bool,
+    is_subscribed: bool = False,
 ) -> None:
+    tier = "subscription" if is_subscribed else "single"
     await bot.send_message(
         chat_id=chat_id,
         text="深度审计已解锁。正在执刀…\nDeep audit unlocked. Cutting now…",
     )
     try:
-        commentary = await generate_commentary(chart, business_plan, question_key)
+        commentary = await generate_commentary(chart, business_plan, question_key, tier=tier)
     except Exception:
         logger.exception("Together.ai API call failed")
         await bot.send_message(
@@ -1034,23 +1041,77 @@ async def _deliver_deep_audit(
         await bot.send_message(
             chat_id=chat_id,
             text="单次权限已销毁。再要审计，重新缴税。\n"
-            "One-shot clearance burned. Pay again for another audit.",
+            "One-shot clearance burned. Pay again for another audit.\n\n"
+            "包月200 TON可无限追问深挖。发送 /subscribe。\n"
+            "Monthly (200 TON) unlocks unlimited follow-ups. Send /subscribe.",
         )
     else:
         await bot.send_message(
             chat_id=chat_id,
-            text="发送 /start 可以再做一次点评。\nSend /start for another analysis.",
+            text="审计结束。你可以直接追问任何细节——流年、合伙人、融资节奏、竞品反杀，继续问。\n"
+            "Audit complete. Reply directly to dig deeper — timing, co-founders, funding, competition. Keep asking.",
         )
 
 
 async def generate_commentary(
-    chart: BirthChart, business_plan: str, question_key: str
+    chart: BirthChart, business_plan: str, question_key: str, tier: str = "single"
 ) -> str:
+    # Build tier-specific system prompt additions
+    if tier == "subscription":
+        tier_instructions = """
+================================================================================
+SUBSCRIPTION TIER (200 TON/月) — DEEP MODE
+================================================================================
+你在为包月深度用户服务。输出要求：
+
+1. LENGTH: 3000-5000中文字。这不是摘要，是完整的审计报告。每个判断都要展开：
+   - 行业背景：这个赛道的真实格局是什么？谁在赚钱？谁在当炮灰？为什么？用具体的行业逻辑解释，不要泛泛而谈。
+   - 因果链：不要只给结论，要展示推理过程。"为什么这个模式必死"比"这个模式必死"值钱一百倍。
+   - 反常识：如果你的判断和大众认知相反，明确说出来并解释为什么。
+
+2. INDUSTRY CONTEXT (BP section扩展):
+   - 这个行业的本质是什么（流量生意/供应链生意/品牌生意/规模效应）
+   - 头部玩家是谁，他们靠什么赢
+   - 新进入者的真实存活率和死因分布
+   - 这个项目在行业格局中的真实位置
+
+3. 螺旋递归（SPIRAL RECURSION）— 报告结尾必须有【追问钩子】section:
+   列出2-3个你在分析中发现但没有完全展开的致命问题，格式为：
+   "🔍 追问1：[一个让用户睡不着觉的问题]——你的八字和BP里藏着一个矛盾，想深挖吗？"
+   这些钩子必须：
+   - 基于报告中已经提到的具体事实（不是空泛的"想了解更多吗"）
+   - 指向真正有价值的深挖方向（流年细节、合伙人选择、融资节奏、竞品反杀路径等）
+   - 让用户产生"不问清楚就亏了"的感觉
+   - 每个钩子暗示包月对话可以继续深挖
+
+4. 包月用户可以在报告后自由追问，所以报告本身要留口子：
+   - 某些判断可以写"这里有一个更深的问题，但需要你告诉我[具体信息]才能展开"
+   - 不要把所有话说尽，但每句话都要有价值
+"""
+        max_tokens = 16384
+    else:
+        tier_instructions = """
+================================================================================
+SINGLE TIER (50 TON) — STRIKE MODE
+================================================================================
+你在为单次付费用户服务。输出要求：
+
+1. LENGTH: 800-1500中文字。短、狠、准。每个section 2-4句话，不展开行业背景。
+2. 结论先行，依据紧跟其后。不要铺垫，不要"首先...其次...最后"的论文腔。
+3. 致命缺陷必须一刀见血，不要"建议关注...风险"。
+4. 报告结尾加一行：
+   "⚡ 包月对话（200 TON/月）可深挖流年窗口、合伙人匹配、融资节奏、竞品反杀。发送 /subscribe。"
+   （英文："⚡ Monthly subscription (200 TON/month) unlocks deep follow-ups on timing, co-founders, funding, competition. Send /subscribe."）
+"""
+        max_tokens = 8192
+
+    full_system_prompt = SYSTEM_PROMPT + "\n" + tier_instructions
+
     payload = {
         "model": TOGETHER_MODEL,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": full_system_prompt},
             {"role": "user", "content": build_user_prompt(chart, business_plan, question_key)},
         ],
     }
