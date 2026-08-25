@@ -180,7 +180,7 @@ PIPELINE (mandatory, no skipped steps)
    - Strength: 合局/会局 > 根气(禄/刃/库) > 月令 > 透干. Never count 五行个数.
    - Distinguish 辰丑湿土 vs 戌未燥土; 库开闭; 羊刃权重; 暗强五条件; 从格必须逐藏干验根.
    - Pattern, 扶抑用神 + 调候用神, 忌神. 身强/身弱 must match 用神.
-   - 大运: 缺性别则明确假设后再排（阳男阴女顺，阴男阳女逆），不得假装已知.
+   - 大运: 命盘文本中已包含代码精确计算的大运表（含起运年龄、每运年份、当前大运标记）和当前流年干支。直接引用，禁止自行编造大运干支或年份。缺性别时命盘会提示无法排大运，此时明确告知用户需补充性别。
    - 缺出生地则标注无法完整真太阳时修正，时辰跨整点则分盘说明.
    - Every 旺衰/格局/用神 claim needs reasoning. No conclusion-only.
 
@@ -378,9 +378,9 @@ CN_MONTHS: Final[dict[int, str]] = {
 }
 SHANGHAI_TZ: Final[tzinfo] = pytz.timezone("Asia/Shanghai")
 BIRTH_FORMAT_HELP: Final[str] = (
-    "Please send: YYYY-MM-DD HH:MM, timezone, location\n"
-    "请按格式发送：YYYY-MM-DD HH:MM, 时区, 出生地\n\n"
-    "Example / 示例：1992-08-15 14:30, Asia/Shanghai, 北京"
+    "Please send: YYYY-MM-DD HH:MM, gender(男/女), timezone, location\n"
+    "请按格式发送：YYYY-MM-DD HH:MM, 性别(男/女), 时区, 出生地\n\n"
+    "Example / 示例：1992-08-15 14:30, 男, Asia/Shanghai, 北京"
 )
 
 
@@ -405,6 +405,7 @@ class BirthChart:
     hidden_stems_text: str
     ten_gods_text: str
     jie_note: str
+    dayun_text: str = ""
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -430,14 +431,16 @@ class BirthChart:
             f"藏干：{self.hidden_stems_text}\n"
             f"十神：{self.ten_gods_text}"
             f"{extra_block}"
+            f"\n{self.dayun_text}"
         )
 
     def to_prompt_block(self) -> str:
         return (
-            "【已排命盘·权威数据，禁止重排四柱】\n"
+            "【已排命盘·权威数据，禁止重排四柱和大运】\n"
             f"用户原始输入：{self.raw_input}\n"
             f"{self.to_user_message()}\n"
-            "后续旺衰、格局、用神、大运必须基于以上四柱与藏干，不得另排。"
+            "以上四柱、藏干、十神、大运均为代码精确计算，禁止LLM自行重排或编造大运流年。"
+            "后续旺衰、格局、用神必须基于以上数据，时间窗口必须引用以上大运和流年。"
         )
 
 
@@ -631,6 +634,96 @@ def _hour_pillar(day_stem: str, hour_idx: int) -> str:
     return STEMS[(first + hour_idx) % 10] + BRANCHES[hour_idx]
 
 
+def _gz_index(gz: str) -> int:
+    """Index in 60 Jiazi cycle (0=甲子)."""
+    si = STEMS.index(gz[0])
+    bi = BRANCHES.index(gz[1])
+    for i in range(60):
+        if i % 10 == si and i % 12 == bi:
+            return i
+    raise ValueError(f"Invalid ganzhi: {gz}")
+
+
+def _compute_dayun(
+    year_gz: str, month_gz: str, true_solar: datetime, gender: str | None
+) -> str:
+    """Compute 大运 (major luck cycles) with starting age and current 流年."""
+    if gender is None:
+        return (
+            "大运：未提供性别，无法排大运。"
+            "阳男阴女顺排，阴男阳女逆排。请在出生信息中注明性别（男/女）。"
+        )
+
+    year_stem = year_gz[0]
+    is_yang_year = year_stem in "甲丙戊庚壬"
+    is_male = gender == "男"
+    forward = (is_yang_year and is_male) or (not is_yang_year and not is_male)
+
+    # Build sorted 节 times around birth
+    year = true_solar.year
+    candidates: list[datetime] = []
+    for y in (year - 1, year, year + 1):
+        for term_id in JIE_TERM_IDS:
+            candidates.append(_jie_datetime(y, term_id))
+    candidates.sort()
+
+    if forward:
+        boundary = next((dt for dt in candidates if dt > true_solar), None)
+        if boundary is None:
+            return "大运：无法定位下一个节令。"
+        delta_days = (boundary - true_solar).total_seconds() / 86400.0
+    else:
+        boundary = None
+        for dt in candidates:
+            if dt <= true_solar:
+                boundary = dt
+            else:
+                break
+        if boundary is None:
+            return "大运：无法定位上一个节令。"
+        delta_days = (true_solar - boundary).total_seconds() / 86400.0
+
+    # 3 days = 1 year, 1 day = 4 months
+    start_age = delta_days / 3.0
+    start_age_years = int(start_age)
+    start_age_months = int(round((start_age - start_age_years) * 12))
+    if start_age_months >= 12:
+        start_age_years += 1
+        start_age_months -= 12
+
+    # Generate 8 pillars from month pillar
+    month_idx = _gz_index(month_gz)
+    step = 1 if forward else -1
+    pillars = []
+    for i in range(1, 9):
+        idx = (month_idx + step * i) % 60
+        pillars.append(STEMS[idx % 10] + BRANCHES[idx % 12])
+
+    dir_text = "顺排" if forward else "逆排"
+    birth_year = true_solar.year
+    lines = [
+        f"大运（{dir_text}，约{start_age_years}岁{start_age_months}个月起运，"
+        f"约{birth_year + start_age_years}年交运）："
+    ]
+    current_dt = datetime.now()
+    current_age = current_dt.year - birth_year
+    for i, gz in enumerate(pillars):
+        age_start = start_age_years + i * 10
+        age_end = age_start + 9
+        year_start = birth_year + age_start
+        year_end = birth_year + age_end
+        marker = " ← 当前" if age_start <= current_age <= age_end else ""
+        lines.append(f"  {gz}（{age_start}-{age_end}岁，{year_start}-{year_end}年）{marker}")
+
+    # Current 流年
+    cy = current_dt.year
+    liunian_offset = (cy - 1984) % 60
+    liunian_gz = STEMS[liunian_offset % 10] + BRANCHES[liunian_offset % 12]
+    lines.append(f"当前流年：{cy}年{liunian_gz}")
+
+    return "\n".join(lines)
+
+
 def _hidden_and_gods(year_gz: str, month_gz: str, day_gz: str, hour_gz: str) -> tuple[str, str]:
     day_stem = day_gz[0]
     hidden_parts = []
@@ -663,6 +756,16 @@ def parse_birth_input(text: str) -> BirthChart:
     rest = raw[match.end() :].strip(" ,，;；/")
     parts = [p.strip() for p in re.split(r"[,，;；]+", rest) if p.strip()]
 
+    # Parse gender (男/女)
+    gender = None
+    for part in parts:
+        if part in ("男", "男性", "boy", "male", "M"):
+            gender = "男"
+            break
+        if part in ("女", "女性", "girl", "female", "F"):
+            gender = "女"
+            break
+
     tz_token = "Asia/Shanghai"
     location = ""
 
@@ -673,17 +776,18 @@ def parse_birth_input(text: str) -> BirthChart:
             break
 
     # Pass 2: find location (city name in table, or Chinese place name)
+    _gender_tokens = {"男", "男性", "boy", "male", "M", "女", "女性", "girl", "female", "F"}
     for part in parts:
-        if part == tz_token:
+        if part == tz_token or part in _gender_tokens:
             continue
         if _resolve_longitude(part) is not None or re.search(r"[\u4e00-\u9fff]{2,}", part):
             location = part
             break
 
-    # Pass 3: if no location found but there are parts, use the last non-tz part
+    # Pass 3: if no location found but there are parts, use the last non-tz non-gender part
     if not location:
         for part in parts:
-            if part != tz_token:
+            if part != tz_token and part not in _gender_tokens:
                 location = part
                 break
 
@@ -737,6 +841,7 @@ def parse_birth_input(text: str) -> BirthChart:
     hour_gz = _hour_pillar(day_gz[0], hour_idx)
 
     hidden_text, gods_text = _hidden_and_gods(year_gz, month_gz, day_gz, hour_gz)
+    dayun_text = _compute_dayun(year_gz, month_gz, true_solar, gender)
     next_txt = f"，下一节{next_jie}" if next_jie else ""
     jie_note = (
         f"月令节气：{jie_name}后{next_txt}"
@@ -760,6 +865,7 @@ def parse_birth_input(text: str) -> BirthChart:
         hidden_stems_text=hidden_text,
         ten_gods_text=gods_text,
         jie_note=jie_note,
+        dayun_text=dayun_text,
         notes=notes,
     )
 
