@@ -171,6 +171,7 @@ FINAL SELF-CHECK before outputting:
 - Did I default 交叉匹配 to "不完全匹配" without analysis? If the pattern genuinely matches, say so and identify execution gaps instead.
 - Did I write "信息不足" anywhere? Delete it — skip sections with no data instead of announcing the gap.
 - Did I mechanically label claims as "八字依据" or "BP依据"? Fuse them into the argument instead.
+- 五行自检：每个天干的五行属性是否写对？相生相克方向是否正确？有没有说"火生水""戊土是火""丙火生扶壬水"这类低级错误？月令是不是月支？身强身弱的用神方向是否一致？有一处错就重写。
 
 ================================================================================
 PIPELINE (mandatory, no skipped steps)
@@ -179,12 +180,22 @@ PIPELINE (mandatory, no skipped steps)
 1) BAZI — use bazi_framework.md on the PRECOMPUTED 命盘 in the user message.
    - The four pillars were calculated with lunarcalendar (农历) + 24 节气 (年柱立春、月柱节令、日柱干支、时柱五鼠遁). They are ground truth. Do NOT re-rank 四柱 from the Gregorian string.
    - Continue from this chart: 地支藏干、十神、旺衰、格局、用神、大运.
+
+   【五行铁律 — 违反即作废】
+   - 天干五行：甲乙=木，丙丁=火，戊己=土，庚辛=金，壬癸=水。戊是土不是火，丙是火不是土。
+   - 相生：木→火→土→金→水→木。火生土不生水，金才生水。
+   - 相克：木→土→水→火→金→木。土克水，水克火。
+   - 十神对日主：印=生我（金生水，对壬水而言金是印）；比劫=同我（水帮水）；食伤=我生（水生木，泄身）；财=我克（水克火，耗身）；官杀=克我（土克水，克身）。
+   - 月令=月支，不是月干。月干是天干透出，不主令。
+   - 身强：喜克泄耗（官杀、食伤、财），忌生扶（印、比劫）。身弱：喜生扶（印、比劫），忌克泄耗。用神必须和旺衰结论一致，身强还取印比为用=自相矛盾。
+   - 根气：日主的根是同五行的地支（壬水根在子、亥、辰丑湿土中藏癸水）。不是"有什么天干透就有什么根"。七杀戊土再旺也是克身的，不是水的根。
+
    - Strength: 合局/会局 > 根气(禄/刃/库) > 月令 > 透干. Never count 五行个数.
    - Distinguish 辰丑湿土 vs 戌未燥土; 库开闭; 羊刃权重; 暗强五条件; 从格必须逐藏干验根.
    - Pattern, 扶抑用神 + 调候用神, 忌神. 身强/身弱 must match 用神.
    - 大运: 命盘文本中已包含代码精确计算的大运表（含起运年龄、每运年份、当前大运标记）和当前流年干支。直接引用，禁止自行编造大运干支或年份。缺性别时命盘会提示无法排大运，此时明确告知用户需补充性别。
    - 缺出生地则标注无法完整真太阳时修正，时辰跨整点则分盘说明.
-   - Every 旺衰/格局/用神 claim needs reasoning. No conclusion-only.
+   - Every 旺衰/格局/用神 claim needs reasoning. No conclusion-only. Reasoning must obey 五行铁律 above.
 
 2) BP — use bp_framework.md on the business-plan text.
    - Extract project portrait from what they wrote. Do not invent TAM/财务数字.
