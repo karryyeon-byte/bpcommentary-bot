@@ -972,6 +972,48 @@ def require_config() -> None:
         )
 
 
+def detect_lang(text: str) -> str:
+    """Return 'zh' if text is primarily Chinese, else 'en'."""
+    if not text:
+        return "en"
+    cjk = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    return "zh" if cjk > len(text) * 0.15 else "en"
+
+
+# UI strings keyed by language
+UI = {
+    "en": {
+        "chart_up": "Chart's up. Now tell me your project / business / startup in one sentence.",
+        "no_project": "No project? Then you only get the pillars, not the verdict.",
+        "send_bp": "Send your BP and product images. PDF, Word, images — all accepted.",
+        "face_verdict": "Face the verdict. I don't do polite encouragement.",
+        "one_sentence": "Can't even write one sentence? Try again.",
+        "parsing": "Parsing your files...",
+        "analyzing": "Analyzing. This takes 30-60 seconds. Don't resend.",
+        "free_upsell": "Full audit: {} $TON (single) or {} $TON/month. Send /start to pay.",
+        "刀已落": "Verdict's down. Dig deeper — timing, co-founders, funding, competition. Just send.",
+    },
+    "zh": {
+        "chart_up": "排盘已出。现在用一句话告诉我你在做什么项目/生意/创业方向。",
+        "no_project": "不给项目？那你只配看四柱，不配被审判。",
+        "send_bp": "把你的BP和产品图发来。PDF、Word、图片都行。",
+        "face_verdict": "接受审判吧。我不会像温吞的导师那样给你和稀泥。",
+        "one_sentence": "一句话都写不明白？重新发。",
+        "parsing": "正在解析文件...",
+        "analyzing": "分析中，需要30-60秒，不要重复发送。",
+        "free_upsell": "完整处刑：{} $TON单次 或 {} $TON包月。发 /start 付费解锁。",
+        "刀已落": "刀已落。追问流年、合伙人、融资节奏、竞品反杀，直接发。",
+    },
+}
+
+
+def ui(context_or_lang, key: str, *args) -> str:
+    """Get UI string. Pass context.user_data or a lang string."""
+    lang = context_or_lang if isinstance(context_or_lang, str) else context_or_lang.get("lang", "en")
+    msg = UI.get(lang, UI["en"]).get(key, UI["en"].get(key, ""))
+    return msg.format(*args) if args else msg
+
+
 def question_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1055,24 +1097,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if user.is_subscribed:
         await update.message.reply_text(
-            f"欢迎回来 / Welcome back.\n"
-            f"包月剩余 {user.days_remaining} 天，自由对话不限次数。\n"
-            f"{user.days_remaining} days remaining. Chat freely.\n\n"
-            f"直接发消息即可对话。/clear 清空历史。/status 查状态。\n"
-            f"Just send a message. /clear clears history. /status shows status."
+            f"Welcome back. {user.days_remaining} days remaining — chat freely.\n"
+            f"包月剩余 {user.days_remaining} 天，直接发消息即可。\n\n"
+            f"/clear — reset history. /status — check status."
         )
         return ConversationHandler.END
 
     await update.message.reply_text(
-        "BPCommentary — 终极审计官\n\n"
-        "选择 / Choose:\n"
-        f"• 免费初判 — 四柱+100字狠判决（需一句话项目）\n"
-        f"• 单次深度处刑 {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON*1.45:.0f}）— 完整八字+BP+成长+交叉+创始人评级+DESTINED/ADJUST/DOOMED\n"
-        f"• 包月无限对话 {MONTHLY_SUBSCRIPTION_TON} TON/月（约${MONTHLY_SUBSCRIPTION_TON*1.45:.0f}）— 不限次数自由对话\n\n"
-        "Free: pillars + 100-word verdict (needs one-sentence project).\n"
-        "Single: full BaZi + BP + growth + cross + founder rating + verdict.\n"
-        "Monthly: unlimited free-form chat.\n\n"
-        "请选择 / Please choose:",
+        "BPCommentary — The Verdict Engine.\n"
+        "Send your birth data + BP. I tell you if it's DESTINED, ADJUST, or DOOMED.\n"
+        "No encouragement. No hedging. Just the verdict.\n\n"
+        "八字×BP审计，判决你的项目生死。\n\n"
+        "Choose your tier:",
         reply_markup=_payment_keyboard(),
     )
     return BIRTH
@@ -1097,6 +1133,8 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data["birth"] = birth
     context.user_data["birth_chart"] = chart
     context.user_data["birth_chart_text"] = chart.to_user_message()
+    # Detect language from user input and lock it
+    context.user_data["lang"] = detect_lang(birth)
     # Persist to DB so free chat remembers the chart across sessions
     db_module.save_birth_chart(update.message.chat_id, chart.to_user_message())
     await update.message.reply_text(chart.to_user_message())
@@ -1104,18 +1142,12 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     # Free chart mode: ask for one-sentence project, then give 100-word judgment
     if context.user_data.get("mode") == "free_chart":
         await update.message.reply_text(
-            "排盘已出。现在用一句话告诉我你在做什么项目/生意/创业方向。\n"
-            "Chart's up. Now tell me your project / business / startup in one sentence.\n\n"
-            "不给项目？那你只配看四柱，不配被审判。\n"
-            "No project? Then you only get the pillars, not the verdict.",
+            f"{ui(context, 'chart_up')}\n\n{ui(context, 'no_project')}"
         )
         return FREE_PROJECT
 
     await update.message.reply_text(
-        "把你的BP和产品图发来。PDF、Word、图片都行。\n"
-        "Send your BP and product images. PDF, Word, images — all accepted.\n\n"
-        "接受审判吧。我不会像温吞的导师那样给你和稀泥。\n"
-        "Face the verdict. I don't do polite encouragement."
+        f"{ui(context, 'send_bp')}\n\n{ui(context, 'face_verdict')}"
     )
     return BUSINESS_PLAN
 
@@ -1125,43 +1157,46 @@ async def receive_free_project(update: Update, context: ContextTypes.DEFAULT_TYP
     assert update.message is not None
     project = (update.message.text or "").strip()
     if len(project) < 5:
-        await update.message.reply_text(
-            "一句话都写不明白？重新发。\n"
-            "Can't even write one sentence? Try again."
-        )
+        await update.message.reply_text(ui(context, "one_sentence"))
         return FREE_PROJECT
+
+    # Update language based on project text (user may switch language)
+    context.user_data["lang"] = detect_lang(project)
 
     chart = context.user_data.get("birth_chart")
     if not chart:
-        await update.message.reply_text("排盘数据丢失，请重新开始。/start")
+        msg = "排盘数据丢失，请重新开始。/start" if context.user_data.get("lang") == "zh" else "Chart data lost. Start over: /start"
+        await update.message.reply_text(msg)
         context.user_data.clear()
         return ConversationHandler.END
 
     try:
-        judgment = await _free_judgment(chart, project)
+        judgment = await _free_judgment(chart, project, lang=context.user_data.get("lang", "en"))
         judgment = _validate_and_fix_dayun(judgment, chart)
         judgment = _strip_soft_language(judgment)
         await update.message.reply_text(judgment)
     except Exception:
         logger.exception("Free judgment failed")
-        await update.message.reply_text("审判生成失败，请重试。")
+        msg = "审判生成失败，请重试。" if context.user_data.get("lang") == "zh" else "Verdict generation failed. Try again."
+        await update.message.reply_text(msg)
 
     # Upsell
-    await update.message.reply_text(
-        f"以上为免费初判（100字）。\n\n"
-        f"完整深度处刑包含：\n"
-        f"• 格局判定 + 用神忌神\n"
-        f"• 大运流年精算\n"
-        f"• BP商业交叉解剖\n"
-        f"• 致命缺陷 + 时间窗口\n"
-        f"• 创始人评级（身价区间）\n"
-        f"• DESTINED / ADJUST / DOOMED 生死判定\n\n"
-        f"单次深度处刑：{SINGLE_ANALYSIS_TON} TON\n"
-        f"包月无限对话：{MONTHLY_SUBSCRIPTION_TON} TON/月\n\n"
-        f"不服？付50 TON看你具体会死在第几层。\n"
-        f"发送 /start 选择付费方案。",
-        reply_markup=_payment_keyboard(),
-    )
+    lang = context.user_data.get("lang", "en")
+    if lang == "zh":
+        upsell = (
+            f"以上为免费初判。\n\n"
+            f"完整深度处刑包含：格局判定、大运流年、BP交叉解剖、致命缺陷、创始人评级、DESTINED/ADJUST/DOOMED。\n\n"
+            f"单次 {SINGLE_ANALYSIS_TON} TON｜包月 {MONTHLY_SUBSCRIPTION_TON} TON/月\n"
+            f"不服？付50 TON看你具体会死在第几层。发送 /start。"
+        )
+    else:
+        upsell = (
+            f"Free verdict above.\n\n"
+            f"Full audit includes: pattern analysis, luck cycles, BP cross-examination, fatal flaws, founder rating, DESTINED/ADJUST/DOOMED.\n\n"
+            f"Single: {SINGLE_ANALYSIS_TON} TON | Monthly: {MONTHLY_SUBSCRIPTION_TON} TON/month\n"
+            f"Unconvinced? Pay 50 TON to see exactly how you die. Send /start."
+        )
+    await update.message.reply_text(upsell, reply_markup=_payment_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1170,17 +1205,15 @@ async def receive_business_plan(update: Update, context: ContextTypes.DEFAULT_TY
     assert update.message is not None
     plan = (update.message.text or "").strip()
     if len(plan) < 10:
-        await update.message.reply_text(
-            "Please add a bit more detail (a few sentences).\n"
-            "请再补充几句，让商业计划更清楚一些。"
-        )
+        msg = "请再补充几句，让商业计划更清楚一些。" if context.user_data.get("lang") == "zh" else "Please add a bit more detail (a few sentences)."
+        await update.message.reply_text(msg)
         return BUSINESS_PLAN
 
+    # Detect/update language from BP text
+    context.user_data["lang"] = detect_lang(plan)
     context.user_data["business_plan"] = plan
-    await update.message.reply_text(
-        "What do you want to know?\n请选择你想了解的问题：",
-        reply_markup=question_keyboard(),
-    )
+    qmsg = "你想了解什么？" if context.user_data["lang"] == "zh" else "What do you want to know?"
+    await update.message.reply_text(qmsg, reply_markup=question_keyboard())
     return QUESTION
 
 
@@ -1223,9 +1256,9 @@ async def receive_business_plan_file(update: Update, context: ContextTypes.DEFAU
         return BUSINESS_PLAN
 
     context.user_data["business_plan"] = plan
-    await update.message.reply_text(
-        "Parsed successfully. What do you want to know?\n解析成功。请选择你想了解的问题：",
-        reply_markup=question_keyboard(),
+    context.user_data["lang"] = detect_lang(plan)
+    qmsg = "解析成功。你想了解什么？" if context.user_data["lang"] == "zh" else "Parsed successfully. What do you want to know?"
+    await update.message.reply_text(qmsg, reply_markup=question_keyboard())
     )
     return QUESTION
 
@@ -1263,6 +1296,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _deliver_deep_audit(
             context.bot, chat_id, chart, business_plan, question_key,
             consume_single=False, is_subscribed=True,
+            lang=context.user_data.get("lang", "en"),
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -1282,6 +1316,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             question_key,
             consume_single=not user.is_subscribed,
             is_subscribed=user.is_subscribed,
+            lang=context.user_data.get("lang", "en"),
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -1292,6 +1327,7 @@ async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "chart": chart,
         "business_plan": business_plan,
         "question_key": question_key,
+        "lang": context.user_data.get("lang", "en"),
     }
     memo = db_module.get_or_create_pending_memo(chat_id, SINGLE_ANALYSIS_TON, "single")
     if query.message:
@@ -1317,23 +1353,21 @@ async def _deliver_deep_audit(
     question_key: str,
     consume_single: bool,
     is_subscribed: bool = False,
+    lang: str = "en",
 ) -> None:
     tier = "subscription" if is_subscribed else "single"
     await bot.send_message(
         chat_id=chat_id,
-        text="深度审计已解锁。正在执刀…\nDeep audit unlocked. Cutting now…",
+        text="Deep audit unlocked. Cutting now…" if lang == "en" else "深度审计已解锁。正在执刀…",
     )
     try:
-        commentary = await generate_commentary(chart, business_plan, question_key, tier=tier)
+        commentary = await generate_commentary(chart, business_plan, question_key, tier=tier, lang=lang)
         commentary = _validate_and_fix_dayun(commentary, chart)
         commentary = _strip_soft_language(commentary)
     except Exception:
         logger.exception("Together.ai API call failed")
-        await bot.send_message(
-            chat_id=chat_id,
-            text="抱歉，点评服务暂时失败。请稍后重新发送 /start。\n"
-            "Commentary service failed. Send /start again later.",
-        )
+        err = "抱歉，点评服务暂时失败。请稍后重新发送 /start。" if lang == "zh" else "Commentary service failed. Send /start again later."
+        await bot.send_message(chat_id=chat_id, text=err)
         return
 
     db_module.increment_analysis_count(chat_id)
@@ -1342,23 +1376,23 @@ async def _deliver_deep_audit(
 
     if consume_single:
         db_module.consume_single_unlock(chat_id)
-        await bot.send_message(
-            chat_id=chat_id,
-            text="单次权限已销毁。再要审计，重新缴税。\n"
-            "One-shot clearance burned. Pay again for another audit.\n\n"
-            "包月200 TON可无限追问深挖。发送 /subscribe。\n"
-            "Monthly (200 TON) unlocks unlimited follow-ups. Send /subscribe.",
-        )
+        if lang == "zh":
+            await bot.send_message(
+                chat_id=chat_id,
+                text="单次权限已销毁。再要审计，重新缴税。\n\n包月200 TON可无限追问深挖。发送 /subscribe。",
+            )
+        else:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="One-shot clearance burned. Pay again for another audit.\n\nMonthly (200 TON) unlocks unlimited follow-ups. Send /subscribe.",
+            )
     else:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="刀已落。追问流年、合伙人、融资节奏、竞品反杀，直接发。\n"
-            "Verdict's down. Dig deeper — timing, co-founders, funding, competition. Just send.",
-        )
+        followup = "刀已落。追问流年、合伙人、融资节奏、竞品反杀，直接发。" if lang == "zh" else "Verdict's down. Dig deeper — timing, co-founders, funding, competition. Just send."
+        await bot.send_message(chat_id=chat_id, text=followup)
 
 
 async def generate_commentary(
-    chart: BirthChart, business_plan: str, question_key: str, tier: str = "single"
+    chart: BirthChart, business_plan: str, question_key: str, tier: str = "single", lang: str = "en"
 ) -> str:
     # Build tier-specific system prompt additions
     if tier == "subscription":
@@ -1413,7 +1447,13 @@ SINGLE TIER (50 TON) — STRIKE MODE
 """
         max_tokens = 8192
 
-    full_system_prompt = SYSTEM_PROMPT + "\n" + tier_instructions
+    # Language instruction
+    if lang == "zh":
+        lang_instruction = "\n================================================================================\nLANGUAGE: 全部用中文输出。处刑卡、深度处刑、所有section都用中文。只有结尾钩子保持中英双语。\n================================================================================\n"
+    else:
+        lang_instruction = "\n================================================================================\nLANGUAGE: Output entirely in English. All sections — execution card, deep audit, every block — must be in English. Only the final hook stays bilingual (English + Chinese). Translate section labels: 处刑卡→EXECUTION CARD, 四柱→CHART, 旺衰→STRENGTH, 用神→FAVORABLE, 格局→PATTERN, BP→BP, 致命结构→FATAL FLAWS, 交叉→CROSSCHECK, 判决→VERDICT, 一句话→ONE LINE, 深度处刑→DEEP AUDIT, 怎么死→HOW IT DIES, 大运→LUCK CYCLES, 合伙人→CO-FOUNDERS, 融资→FUNDING, 下一刀→NEXT MOVE, 创始人评级→FOUNDER RATING.\n================================================================================\n"
+
+    full_system_prompt = SYSTEM_PROMPT + "\n" + tier_instructions + lang_instruction
 
     payload = {
         "model": TOGETHER_MODEL,
@@ -1536,9 +1576,13 @@ CRITICAL — 大运 DISPLAY RULE:
 """
 
 
-async def _free_judgment(chart: BirthChart, project: str) -> str:
+async def _free_judgment(chart: BirthChart, project: str, lang: str = "en") -> str:
+    lang_line = (
+        "Output entirely in Chinese." if lang == "zh"
+        else "Output entirely in English. Use English labels: STRENGTH, PATTERN, VERDICT. End with: 'Full audit: 50 TON single / 200 TON monthly → t.me/BPCommentary_bot'"
+    )
     messages = [
-        {"role": "system", "content": FREE_JUDGMENT_PROMPT},
+        {"role": "system", "content": FREE_JUDGMENT_PROMPT + "\n" + lang_line},
         {
             "role": "user",
             "content": (
@@ -1678,25 +1722,25 @@ def _payment_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "免费排盘（四柱+旺衰）",
+                    "Free Verdict (pillars + 100 words)",
                     callback_data="free_chart",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"单次锐评 {SINGLE_ANALYSIS_TON} $TON",
+                    f"Full Audit — {SINGLE_ANALYSIS_TON} $TON",
                     callback_data="pay_single",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"包月对话 {MONTHLY_SUBSCRIPTION_TON} $TON/月",
+                    f"Unlimited Chat — {MONTHLY_SUBSCRIPTION_TON} $TON/month",
                     callback_data="pay_subscribe",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "没有TON？支付宝/微信/USDT → 联系客服",
+                    "No TON? Alipay/WeChat/USDT → @BPCommentary",
                     callback_data="contact_admin",
                 )
             ],
@@ -1785,6 +1829,7 @@ async def poll_ton_chain(context: ContextTypes.DEFAULT_TYPE) -> None:
                 payload["business_plan"],
                 payload["question_key"],
                 consume_single=True,
+                lang=payload.get("lang", "en"),
             )
         else:
             await context.bot.send_message(
@@ -1877,7 +1922,7 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     birth_chart = user.birth_chart_text or context.user_data.get("birth_chart_text", "")
 
     try:
-        reply = await chat_mode.chat_reply(user_msg, history, birth_chart)
+        reply = await chat_mode.chat_reply(user_msg, history, birth_chart, lang=detect_lang(user_msg))
     except Exception as e:
         logger.exception("Chat mode failed")
         reply = f"服务暂时不可用 / Service temporarily unavailable: {e}"

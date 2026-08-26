@@ -56,6 +56,7 @@ async def chat_reply(
     user_message: str,
     history: list[dict],
     birth_chart_text: str = "",
+    lang: str = "en",
 ) -> str:
     """
     Generate a free-form chat reply for a subscribed user.
@@ -66,6 +67,12 @@ async def chat_reply(
         birth_chart_text: Pre-computed birth chart block if user has one, else "".
     """
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+
+    # Language instruction
+    if lang == "zh":
+        messages.append({"role": "system", "content": "全部用中文回复。"})
+    else:
+        messages.append({"role": "system", "content": "Reply entirely in English."})
 
     if birth_chart_text:
         messages.append({
