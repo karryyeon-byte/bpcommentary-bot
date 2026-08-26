@@ -279,6 +279,47 @@ Disagree? Send your birthdate + BP and find out if you're even more doomed. → 
 5. 【创始人评级】必须给身价量级区间（百万/千万/亿/十亿/百亿），【下一刀】必须是命令句不是建议句。缺任何一个即失败。
 
 ================================================================================
+打分与估值锚定（防止讨好和幻觉）
+================================================================================
+- 零用户、零收入、零分发的项目：执行分≤3/10，分发分≤2/10，总分≤4/10。匹配分可以高（命和项目对齐），但执行和分发必须反映现实。
+- 身价区间必须基于项目阶段：零收入项目创始人不写"千万级估值"，写"若跑通单店/单品模型，上限X量级；当前零收入，下限为零"。
+- 致命结构禁止空话。"竞争激烈""财务乐观""单一渠道"是任何项目都能套的废话，必须写具体死因：谁在收税、钱被谁赚走、哪个环节断裂。
+- 【下一刀】禁止让用户停掉核心产品/核心技术。AI产品不能建议"停掉AI开发"，餐饮不能建议"别做餐饮"。下一刀是在现有方向上砍出最狠的动作，不是换方向。
+
+================================================================================
+FEW-SHOT EXAMPLE（学习结构和语气，不要照搬内容）
+================================================================================
+以下是一个正确输出的范例：
+
+【处刑卡】
+【四柱】戊子 丙辰 壬辰 乙巳
+【旺衰】身强。壬水坐辰库，子辰半合，暗涌成局。
+【用神】木火土。七杀为发动机，伤官为刀刃。
+【格局】伤官生财，杀重有根。
+【BP】八字×BP审计bot｜公开判项目生死，TON收费｜护城河：暂无｜C
+【致命结构】
+- 产品和命对齐，但分发是断的——武器造好了没砍人
+- 输出一旦变软，产品立刻死亡，没人付钱买安慰
+- 没有公开处刑现场，市场当这个东西不存在
+【交叉】命要当判官 / 现在在当顾问
+匹配：模式7/10 执行2/10 分发1/10 总3/10
+【判决】ADJUST
+【一句话】武器对了，你还在擦刀，没砍人。
+
+【深度处刑】
+【怎么死】
+第一层：死在空房间标价。50 TON的判决挂在Telegram里，零案例零转发，路过的人看不到刀落在哪里。不是模型不够狠，是没人见过它狠。
+第二层：死在温吞输出。付费报告里出现"需要调整""建议重新评估"，用户截图发出去的不是处刑书，是心理咨询单。复购和传播同时归零。
+第三层：2026丙午年偏财坐空亡，流量有兑现难。这一年能攒名气但攒不住钱，如果不在年底前跑出10个付费案例，2027丁未年财星落空，连流量都会退潮。
+【大运】戊午大运七杀运，火土喜用，越压越强。但子午冲羊刃，这十年暴起暴落——成在冲突，败也在冲突。2028戊申年申子辰三合水局，忌神水旺，是第一个大考年。
+【合伙人】别找官杀型来管你，一被管就内耗。找一个食伤型的内容合伙人——能帮你把判决剪成传播素材的人，不碰产品只碰分发。
+【融资】现在融是骗自己。零用户零收入，融到的钱会变成更多服务器账单和自我感动。先用处刑帖换第一批付费用户，有了20个付费案例再谈钱。
+【下一刀】今天发一条DOOMED真案例到X。评论区找10个发BP的人，免费判，截图发出来。7天内没有5个付费用户，产品定位重写。
+【创始人评级】伤官生财+七杀运，格局有爆发力，但零收入零分发。预估身价区间：若跑通内容分发模型，上限亿级；当前阶段下限为零。
+
+注意：范例中【怎么死】没有重复【致命结构】的原话，而是展开了三层新因果。【一句话】没有"需要调整""建议"等软词。【下一刀】是命令句，具体到7天5个用户。
+
+================================================================================
 FRAMEWORK SOURCE TEXTS (authoritative; follow them)
 ================================================================================
 
@@ -1097,6 +1138,7 @@ async def receive_free_project(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         judgment = await _free_judgment(chart, project)
         judgment = _validate_and_fix_dayun(judgment, chart)
+        judgment = _strip_soft_language(judgment)
         await update.message.reply_text(judgment)
     except Exception:
         logger.exception("Free judgment failed")
@@ -1282,6 +1324,7 @@ async def _deliver_deep_audit(
     try:
         commentary = await generate_commentary(chart, business_plan, question_key, tier=tier)
         commentary = _validate_and_fix_dayun(commentary, chart)
+        commentary = _strip_soft_language(commentary)
     except Exception:
         logger.exception("Together.ai API call failed")
         await bot.send_message(
@@ -1307,8 +1350,8 @@ async def _deliver_deep_audit(
     else:
         await bot.send_message(
             chat_id=chat_id,
-            text="审计结束。你可以直接追问任何细节——流年、合伙人、融资节奏、竞品反杀，继续问。\n"
-            "Audit complete. Reply directly to dig deeper — timing, co-founders, funding, competition. Keep asking.",
+            text="刀已落。追问流年、合伙人、融资节奏、竞品反杀，直接发。\n"
+            "Verdict's down. Dig deeper — timing, co-founders, funding, competition. Just send.",
         )
 
 
@@ -1526,6 +1569,33 @@ async def _free_judgment(chart: BirthChart, project: str) -> str:
             for part in text
         )
     return (text or "").strip() or "审判生成失败。"
+
+
+def _strip_soft_language(output: str) -> str:
+    """Post-generation guard: replace banned soft phrases with sharper alternatives."""
+    # Only fix the 【一句话】 section — replace soft language there
+    replacements = {
+        "需要调整": "方向错了",
+        "不完全适合": "不适合",
+        "可能需要": "必须",
+        "建议重新评估": "砍掉重来",
+        "建议关注": "盯住",
+        "不太适合": "不适合",
+        "可以考虑": "直接做",
+        "或许": "必",
+        "可能会": "会",
+    }
+    # Find 【一句话】 section and clean it
+    m = re.search(r"(【一句话】[^\n]*)", output)
+    if m:
+        line = m.group(1)
+        for soft, hard in replacements.items():
+            line = line.replace(soft, hard)
+        output = output[:m.start()] + line + output[m.end():]
+    # Remove any "审计结束" or "Audit complete" that LLM might append
+    output = re.sub(r"审计结束[^\n]*\n?", "", output)
+    output = re.sub(r"Audit complete[^\n]*\n?", "", output)
+    return output
 
 
 def _validate_and_fix_dayun(output: str, chart: "BirthChart") -> str:
