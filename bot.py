@@ -1466,39 +1466,50 @@ async def _free_strength_analysis(chart: BirthChart) -> str:
 
 def _validate_and_fix_dayun(output: str, chart: "BirthChart") -> str:
     """
-    Post-generation guard: if the LLM mentions 大运 but cites pillars not in the
-    precomputed dayun list, append a correction block. Catches hallucinations like
-    '丁火大运' or wrong pillar sequences.
+    Post-generation guard: silently replace hallucinated 大运 pillars with the
+    correct precomputed ones. No correction block — the user should never see
+    that the LLM got it wrong.
     """
     if not chart.dayun_text or "大运" not in chart.dayun_text:
-        return output  # no dayun to validate against
+        return output
 
-    # Extract valid dayun pillars from chart.dayun_text (format: "  乙未（7-16岁...")
-    valid_pillars = set(re.findall(
+    # Extract ordered valid dayun pillars and find the current one
+    valid_pillars = re.findall(
         r"([甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥])（",
         chart.dayun_text,
-    ))
+    )
     if not valid_pillars:
         return output
 
-    # Find all ganzhi pairs in the output
-    cited = re.findall(r"[甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥]", output)
+    # Find current dayun (marked with ← 当前)
+    current_match = re.search(
+        r"([甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥])（[^）]*）\s*←\s*当前",
+        chart.dayun_text,
+    )
+    current_dayun = current_match.group(1) if current_match else valid_pillars[1] if len(valid_pillars) > 1 else valid_pillars[0]
 
-    # If the output discusses 大运 and cites a pillar not in valid list, flag it
-    discusses_dayun = bool(re.search(r"大运|起运|交运|岁运", output))
-    wrong_pillars = []
-    for p in cited:
-        if discusses_dayun and p not in valid_pillars:
-            # Check it's not a year pillar or day pillar (those are valid to mention)
-            if p not in (chart.year_gz, chart.month_gz, chart.day_gz, chart.hour_gz):
-                wrong_pillars.append(p)
+    valid_set = set(valid_pillars)
+    four_pillars = {chart.year_gz, chart.month_gz, chart.day_gz, chart.hour_gz}
 
-    if wrong_pillars:
-        correction = (
-            "\n\n⚠️ 【大运纠正】以上大运干支由AI生成时出错，以下为代码精确计算结果，请以此为准：\n"
-            f"{chart.dayun_text}"
-        )
-        return output + correction
+    # Find ganzhi pairs in dayun context (followed by 大运/运/岁 or in a list)
+    # Replace any non-valid, non-four-pillar ganzhi in dayun context with current_dayun
+    def _replace_wrong(m):
+        gz = m.group(0)
+        if gz in valid_set or gz in four_pillars:
+            return gz
+        # Check if this ganzhi is in a dayun context (within 10 chars of 运)
+        start = max(0, m.start() - 10)
+        end = min(len(output), m.end() + 10)
+        context = output[start:end]
+        if re.search(r"[大岁起交]运", context):
+            return current_dayun
+        return gz
+
+    output = re.sub(
+        r"[甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥]",
+        _replace_wrong,
+        output,
+    )
 
     return output
 
