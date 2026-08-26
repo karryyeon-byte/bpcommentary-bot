@@ -1259,7 +1259,6 @@ async def receive_business_plan_file(update: Update, context: ContextTypes.DEFAU
     context.user_data["lang"] = detect_lang(plan)
     qmsg = "解析成功。你想了解什么？" if context.user_data["lang"] == "zh" else "Parsed successfully. What do you want to know?"
     await update.message.reply_text(qmsg, reply_markup=question_keyboard())
-    )
     return QUESTION
 
 
