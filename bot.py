@@ -390,9 +390,12 @@ CN_MONTHS: Final[dict[int, str]] = {
 }
 SHANGHAI_TZ: Final[tzinfo] = pytz.timezone("Asia/Shanghai")
 BIRTH_FORMAT_HELP: Final[str] = (
-    "Please send: YYYY-MM-DD HH:MM, gender(男/女), timezone, location\n"
-    "请按格式发送：YYYY-MM-DD HH:MM, 性别(男/女), 时区, 出生地\n\n"
-    "Example / 示例：1992-08-15 14:30, 男, Asia/Shanghai, 北京"
+    "格式 / Format: 性别 出生日期 时间 出生地（时区可选，默认北京时间）\n"
+    "Gender YYYY-MM-DD HH:MM Birthplace (timezone optional, defaults to Asia/Shanghai)\n\n"
+    "示例 / Examples:\n"
+    "  男 1996-06-15 18:30 北京\n"
+    "  女 1990年8月20日 14:30 上海\n"
+    "  1992-08-15 14:30, 男, Asia/Shanghai, 北京"
 )
 
 
@@ -753,30 +756,34 @@ def _hidden_and_gods(year_gz: str, month_gz: str, day_gz: str, hour_gz: str) -> 
 
 def parse_birth_input(text: str) -> BirthChart:
     raw = text.strip()
+
+    # Extract gender FIRST from anywhere in the raw text (even if glued to other tokens)
+    gender = None
+    gm = re.search(r"[男/女]", raw)
+    if gm:
+        gender = gm.group()
+        # Remove the gender char so it doesn't pollute tz/location parsing
+        raw_for_parse = raw[:gm.start()] + raw[gm.end():]
+    else:
+        raw_for_parse = raw
+
+    # Flexible date matching: supports 1996-06-15, 1996/6/15, 1996年6月15日, etc.
     match = re.search(
-        r"(?P<y>\d{4})[-/](?P<m>\d{1,2})[-/](?P<d>\d{1,2})[ T](?P<h>\d{1,2})[:点](?P<min>\d{2})",
-        raw,
+        r"(?P<y>\d{4})\s*[-/年.]\s*(?P<m>\d{1,2})\s*[-/月.]\s*(?P<d>\d{1,2})\s*[日号]?\s*[ T]?\s*(?P<h>\d{1,2})\s*[:点时]\s*(?P<min>\d{2})?",
+        raw_for_parse,
     )
     if not match:
         raise BirthParseError(BIRTH_FORMAT_HELP)
 
     year, month, day = int(match.group("y")), int(match.group("m")), int(match.group("d"))
-    hour, minute = int(match.group("h")), int(match.group("min"))
+    hour = int(match.group("h"))
+    minute = int(match.group("min")) if match.group("min") else 0
     if not (1900 <= year <= 2100):
         raise BirthParseError("Birth year must be 1900–2100. / 出生年份需在 1900–2100。")
 
-    rest = raw[match.end() :].strip(" ,，;；/")
-    parts = [p.strip() for p in re.split(r"[,，;；]+", rest) if p.strip()]
-
-    # Parse gender (男/女)
-    gender = None
-    for part in parts:
-        if part in ("男", "男性", "boy", "male", "M"):
-            gender = "男"
-            break
-        if part in ("女", "女性", "girl", "female", "F"):
-            gender = "女"
-            break
+    # Everything before and after the date match is "rest"
+    rest = (raw_for_parse[:match.start()] + " " + raw_for_parse[match.end():]).strip(" ,，;；/")
+    parts = [p.strip() for p in re.split(r"[,，;；\s]+", rest) if p.strip()]
 
     tz_token = "Asia/Shanghai"
     location = ""
@@ -788,9 +795,9 @@ def parse_birth_input(text: str) -> BirthChart:
             break
 
     # Pass 2: find location (city name in table, or Chinese place name)
-    _gender_tokens = {"男", "男性", "boy", "male", "M", "女", "女性", "girl", "female", "F"}
+    _skip_tokens = {"男", "男性", "boy", "male", "M", "女", "女性", "girl", "female", "F", "北京时间", "中国时间"}
     for part in parts:
-        if part == tz_token or part in _gender_tokens:
+        if part == tz_token or part.lower() in {t.lower() for t in _skip_tokens}:
             continue
         if _resolve_longitude(part) is not None or re.search(r"[\u4e00-\u9fff]{2,}", part):
             location = part
@@ -799,7 +806,7 @@ def parse_birth_input(text: str) -> BirthChart:
     # Pass 3: if no location found but there are parts, use the last non-tz non-gender part
     if not location:
         for part in parts:
-            if part != tz_token and part not in _gender_tokens:
+            if part != tz_token and part.lower() not in {t.lower() for t in _skip_tokens}:
                 location = part
                 break
 
@@ -946,9 +953,22 @@ def split_telegram_text(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> 
 
 def build_user_prompt(chart: BirthChart, business_plan: str, question_key: str) -> str:
     question = QUESTION_LABELS.get(question_key, question_key)
+    # Extract dayun pillars for explicit lockdown
+    dayun_pillars = re.findall(
+        r"\s([甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥])（",
+        chart.dayun_text or "",
+    )
+    dayun_lock = ""
+    if dayun_pillars:
+        dayun_lock = (
+            f"\n\n【大运锁定】你在分析中引用大运时，只能使用以下干支，顺序不可改变："
+            f"{' → '.join(dayun_pillars)}。"
+            f"当前流年见命盘。任何不在此列表中的大运干支都是你的幻觉，必须删除。"
+        )
     return (
         "Please provide BPCommentary for this founder.\n\n"
-        f"{chart.to_prompt_block()}\n\n"
+        f"{chart.to_prompt_block()}"
+        f"{dayun_lock}\n\n"
         f"Business plan (short description):\n{business_plan}\n\n"
         f"What they want to know:\n{question}\n"
     )
@@ -1017,6 +1037,7 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         # Generate a brief strength analysis using LLM
         try:
             strength_analysis = await _free_strength_analysis(chart)
+            strength_analysis = _validate_and_fix_dayun(strength_analysis, chart)
             await update.message.reply_text(strength_analysis)
         except Exception:
             logger.exception("Free strength analysis failed")
@@ -1207,6 +1228,7 @@ async def _deliver_deep_audit(
     )
     try:
         commentary = await generate_commentary(chart, business_plan, question_key, tier=tier)
+        commentary = _validate_and_fix_dayun(commentary, chart)
     except Exception:
         logger.exception("Together.ai API call failed")
         await bot.send_message(
@@ -1393,6 +1415,12 @@ FREE_STRENGTH_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
 This is a FREE tier output — you ONLY analyze 旺衰 (day master strength).
 Do NOT analyze 格局, 用神, 大运, BP, or give final verdicts. Those are paid.
 
+CRITICAL — 大运 DISPLAY RULE:
+- The pre-computed chart below already displays the 大运 table to the user.
+- You MUST NOT list, repeat, discuss, analyze, or mention any 大运干支 (e.g. 乙未, 丙申, 戊午) in your reply.
+- You MUST NOT state which 大运 the person is currently in.
+- If you mention 大运 at all, you have FAILED. The user already sees it above your reply.
+
 Rules:
 - Reply in Chinese first, then English translation.
 - Based on the pre-computed chart below.
@@ -1434,6 +1462,45 @@ async def _free_strength_analysis(chart: BirthChart) -> str:
             for part in text
         )
     return (text or "").strip() or "旺衰分析生成失败。"
+
+
+def _validate_and_fix_dayun(output: str, chart: "BirthChart") -> str:
+    """
+    Post-generation guard: if the LLM mentions 大运 but cites pillars not in the
+    precomputed dayun list, append a correction block. Catches hallucinations like
+    '丁火大运' or wrong pillar sequences.
+    """
+    if not chart.dayun_text or "大运" not in chart.dayun_text:
+        return output  # no dayun to validate against
+
+    # Extract valid dayun pillars from chart.dayun_text (format: "  乙未（7-16岁...")
+    valid_pillars = set(re.findall(
+        r"([甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥])（",
+        chart.dayun_text,
+    ))
+    if not valid_pillars:
+        return output
+
+    # Find all ganzhi pairs in the output
+    cited = re.findall(r"[甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥]", output)
+
+    # If the output discusses 大运 and cites a pillar not in valid list, flag it
+    discusses_dayun = bool(re.search(r"大运|起运|交运|岁运", output))
+    wrong_pillars = []
+    for p in cited:
+        if discusses_dayun and p not in valid_pillars:
+            # Check it's not a year pillar or day pillar (those are valid to mention)
+            if p not in (chart.year_gz, chart.month_gz, chart.day_gz, chart.hour_gz):
+                wrong_pillars.append(p)
+
+    if wrong_pillars:
+        correction = (
+            "\n\n⚠️ 【大运纠正】以上大运干支由AI生成时出错，以下为代码精确计算结果，请以此为准：\n"
+            f"{chart.dayun_text}"
+        )
+        return output + correction
+
+    return output
 
 
 # ─── Payment & Subscription ───────────────────────────────────────────────
