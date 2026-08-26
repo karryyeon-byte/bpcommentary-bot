@@ -1008,8 +1008,15 @@ UI = {
 
 
 def ui(context_or_lang, key: str, *args) -> str:
-    """Get UI string. Pass context.user_data or a lang string."""
-    lang = context_or_lang if isinstance(context_or_lang, str) else context_or_lang.get("lang", "en")
+    """Get UI string. Pass context.user_data dict, a lang string, or context object."""
+    if isinstance(context_or_lang, str):
+        lang = context_or_lang
+    elif hasattr(context_or_lang, "user_data"):
+        lang = context_or_lang.user_data.get("lang", "en")
+    elif isinstance(context_or_lang, dict):
+        lang = context_or_lang.get("lang", "en")
+    else:
+        lang = "en"
     msg = UI.get(lang, UI["en"]).get(key, UI["en"].get(key, ""))
     return msg.format(*args) if args else msg
 
