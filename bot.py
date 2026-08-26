@@ -69,7 +69,7 @@ ADMIN_CONTACT_URL: Final[str] = os.getenv(
 ADMIN_WECHAT: Final[str] = os.getenv("ADMIN_WECHAT", "BDR_Gerard137").strip()
 ALIPAY_QR_PATH: Final[str] = os.path.join(os.path.dirname(__file__), "alipay_qr.jpg")
 
-BIRTH, BUSINESS_PLAN, QUESTION = range(3)
+BIRTH, BUSINESS_PLAN, QUESTION, FREE_PROJECT = range(4)
 
 QUESTION_LABELS: Final[dict[str, str]] = {
     "fit": "Is this project right for me? / 这个项目适合我吗？",
@@ -241,19 +241,20 @@ Keep the full reply tight enough for chat, but never skip 依据.
 
 Chinese section first, then English translation, same structure:
 
-【命盘】四柱 + 关键藏干/十神
-【旺衰】分级 + 合局/根气/燥湿/开库依据
-【格局】正格或变格 + 成败
-【用神】扶抑 + 调候 + 忌神
+【命盘速览】（限6行以内）四柱 + 旺衰结论 + 格局 + 用神忌神。不展开藏干十神教科书，不写"戊土七杀坐子水劫财"这类查表内容。一句话说清身强身弱和格局。
 【BP】一句话定位 + 模式是否成立 + 护城河 + S/A/B/C/D
-【致命缺陷】生意本身最可能怎么死
-【交叉匹配】创始人类型 / 模式 / 行业 / 节奏 / 团队 各X/10 + 总匹配
+【致命缺陷】生意本身最可能怎么死（3-5段因果链）
+【交叉匹配】创始人类型 / 模式 / 行业 / 节奏 / 团队 各X/10 + 总匹配，融合论证不机械标注
 【致命矛盾】1-2个真实矛盾
 【时间窗口】融资 / 扩张 / 风险年（流年→大运→原局）
 【成长】（仅在用户提供了成长经历时出现，否则跳过此节）
-【最终判定】天命所归 / 需要调整 / 逆天而行 — 三选一，必须写清楚判定依据，禁止"不太适合""可能需要""或者调整"等模糊表述
-【创始人评级】格局层级 + 行业天花板 + 大运窗口 → 预估身价区间（千万级/亿级/十亿级/百亿级），写明上限和下限的依据，标注"命理娱乐参考，不构成投资建议"
+【最终判定】DESTINED（天命所归）/ ADJUST（需要调整）/ DOOMED（逆天而行）— 三选一，必须写清楚判定依据，禁止"不太适合""可能需要""或者调整"等模糊表述
+【创始人评级】格局层级 + 行业天花板 + 大运窗口 → 预估身价区间，写明上下限依据，标注"命理娱乐参考"
 【一句话定论】最狠、可截图的一句
+
+输出最后固定两行（中英文各一行）：
+不服？把你的生日和BP发来，看你会不会死得更惨。→ t.me/BPCommentary_bot
+Disagree? Send your birthdate + BP and find out if you're even more doomed. → t.me/BPCommentary_bot
 
 ================================================================================
 FRAMEWORK SOURCE TEXTS (authoritative; follow them)
@@ -1000,11 +1001,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "BPCommentary — 终极审计官\n\n"
         "选择 / Choose:\n"
-        f"• 免费排盘 — 四柱+藏干+旺衰判定（引流）\n"
-        f"• 单次深度锐评 {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON*1.45:.0f}）— 完整八字+BP+成长+交叉+生死判定\n"
+        f"• 免费初判 — 四柱+100字狠判决（需一句话项目）\n"
+        f"• 单次深度处刑 {SINGLE_ANALYSIS_TON} TON（约${SINGLE_ANALYSIS_TON*1.45:.0f}）— 完整八字+BP+成长+交叉+创始人评级+DESTINED/ADJUST/DOOMED\n"
         f"• 包月无限对话 {MONTHLY_SUBSCRIPTION_TON} TON/月（约${MONTHLY_SUBSCRIPTION_TON*1.45:.0f}）— 不限次数自由对话\n\n"
-        "Free chart: pillars + hidden stems + strength.\n"
-        "Single: full BaZi + BP + growth + cross + verdict.\n"
+        "Free: pillars + 100-word verdict (needs one-sentence project).\n"
+        "Single: full BaZi + BP + growth + cross + founder rating + verdict.\n"
         "Monthly: unlimited free-form chat.\n\n"
         "请选择 / Please choose:",
         reply_markup=_payment_keyboard(),
@@ -1035,33 +1036,15 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     db_module.save_birth_chart(update.message.chat_id, chart.to_user_message())
     await update.message.reply_text(chart.to_user_message())
 
-    # Free chart mode: output only pillars + strength, then upsell
+    # Free chart mode: ask for one-sentence project, then give 100-word judgment
     if context.user_data.get("mode") == "free_chart":
-        # Generate a brief strength analysis using LLM
-        try:
-            strength_analysis = await _free_strength_analysis(chart)
-            strength_analysis = _validate_and_fix_dayun(strength_analysis, chart)
-            await update.message.reply_text(strength_analysis)
-        except Exception:
-            logger.exception("Free strength analysis failed")
-
-        # Upsell
         await update.message.reply_text(
-            "以上为免费排盘（四柱+旺衰）。\n\n"
-            "完整深度锐评包含：\n"
-            "• 格局判定（正格/变格/从格）\n"
-            "• 用神忌神（扶抑+调候）\n"
-            "• 大运流年（当前运+未来10年）\n"
-            "• BP商业交叉分析\n"
-            "• 成长经历交叉验证\n"
-            "• 生死判定（天命所归/需要调整/逆天而行）\n\n"
-            f"单次深度锐评：{SINGLE_ANALYSIS_TON} TON\n"
-            f"包月无限对话：{MONTHLY_SUBSCRIPTION_TON} TON/月\n\n"
-            "发送 /start 选择付费方案。",
-            reply_markup=_payment_keyboard(),
+            "排盘已出。现在用一句话告诉我你在做什么项目/生意/创业方向。\n"
+            "Chart's up. Now tell me your project / business / startup in one sentence.\n\n"
+            "不给项目？那你只配看四柱，不配被审判。\n"
+            "No project? Then you only get the pillars, not the verdict.",
         )
-        context.user_data.clear()
-        return ConversationHandler.END
+        return FREE_PROJECT
 
     await update.message.reply_text(
         "把你的BP和产品图发来。PDF、Word、图片都行。\n"
@@ -1070,6 +1053,51 @@ async def receive_birth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         "Face the verdict. I don't do polite encouragement."
     )
     return BUSINESS_PLAN
+
+
+async def receive_free_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Free tier: receive one-sentence project, generate 100-word sharp judgment."""
+    assert update.message is not None
+    project = (update.message.text or "").strip()
+    if len(project) < 5:
+        await update.message.reply_text(
+            "一句话都写不明白？重新发。\n"
+            "Can't even write one sentence? Try again."
+        )
+        return FREE_PROJECT
+
+    chart = context.user_data.get("birth_chart")
+    if not chart:
+        await update.message.reply_text("排盘数据丢失，请重新开始。/start")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    try:
+        judgment = await _free_judgment(chart, project)
+        judgment = _validate_and_fix_dayun(judgment, chart)
+        await update.message.reply_text(judgment)
+    except Exception:
+        logger.exception("Free judgment failed")
+        await update.message.reply_text("审判生成失败，请重试。")
+
+    # Upsell
+    await update.message.reply_text(
+        f"以上为免费初判（100字）。\n\n"
+        f"完整深度处刑包含：\n"
+        f"• 格局判定 + 用神忌神\n"
+        f"• 大运流年精算\n"
+        f"• BP商业交叉解剖\n"
+        f"• 致命缺陷 + 时间窗口\n"
+        f"• 创始人评级（身价区间）\n"
+        f"• DESTINED / ADJUST / DOOMED 生死判定\n\n"
+        f"单次深度处刑：{SINGLE_ANALYSIS_TON} TON\n"
+        f"包月无限对话：{MONTHLY_SUBSCRIPTION_TON} TON/月\n\n"
+        f"不服？付50 TON看你具体会死在第几层。\n"
+        f"发送 /start 选择付费方案。",
+        reply_markup=_payment_keyboard(),
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def receive_business_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1427,38 +1455,38 @@ async def admin_grant_single_command(update: Update, context: ContextTypes.DEFAU
     )
 
 
-# ─── Free Chart (strength only) ───────────────────────────────────────────
+# ─── Free Tier: 100-word sharp judgment ────────────────────────────────────
 
-FREE_STRENGTH_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
-This is a FREE tier output — you ONLY analyze 旺衰 (day master strength).
-Do NOT analyze 格局, 用神, 大运, BP, or give final verdicts. Those are paid.
+FREE_JUDGMENT_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
+This is a FREE tier output — you give a 100-word sharp judgment combining 旺衰 + the user's one-sentence project.
+
+CRITICAL RULES:
+- 100-150 Chinese characters total. Not more.
+- Structure: ①旺衰结论（一句话）②这个项目和你的命合不合（一句话）③最可能怎么死/怎么赢（一句话）④挑衅式结尾（一句话）
+- No 藏干/十神教科书。No 大运讨论。No 格局展开。
+- Tone: 毒辣、高傲、一刀见血。像审计官不像顾问。
+- Must mention the user's specific project by name/type.
+- End with: "完整处刑需付费解锁。"
 
 CRITICAL — 大运 DISPLAY RULE:
-- The pre-computed chart below already displays the 大运 table to the user.
-- You MUST NOT list, repeat, discuss, analyze, or mention any 大运干支 (e.g. 乙未, 丙申, 戊午) in your reply.
-- You MUST NOT state which 大运 the person is currently in.
-- If you mention 大运 at all, you have FAILED. The user already sees it above your reply.
-
-Rules:
-- Reply in Chinese first, then English translation.
-- Based on the pre-computed chart below.
-- Analyze: 根气(禄/刃/库), 合局/会局, 月令, 透干, 燥湿, 开库.
-- Conclude: 身强 / 身弱 / 中和偏强 / 中和偏弱 / 暗涌型身强.
-- Give reasoning, not just conclusion.
-- At the end, add exactly: "完整格局/用神/大运/BP交叉/生死判定需付费解锁。"
-- Keep it tight: 3-5 paragraphs max.
+- You MUST NOT list, repeat, discuss, analyze, or mention any 大运干支.
 """
 
 
-async def _free_strength_analysis(chart: BirthChart) -> str:
-    """Lightweight LLM call: only analyze day master strength (free tier)."""
+async def _free_judgment(chart: BirthChart, project: str) -> str:
     messages = [
-        {"role": "system", "content": FREE_STRENGTH_PROMPT},
-        {"role": "user", "content": f"Pre-computed chart:\n{chart.to_user_message()}\n\nAnalyze 旺衰 only."},
+        {"role": "system", "content": FREE_JUDGMENT_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"Pre-computed chart:\n{chart.to_user_message()}\n\n"
+                f"User project: {project}\n\nGive the 100-word judgment."
+            ),
+        },
     ]
     payload = {
         "model": TOGETHER_MODEL,
-        "max_tokens": 1024,
+        "max_tokens": 512,
         "messages": messages,
     }
     headers = {
@@ -1467,8 +1495,8 @@ async def _free_strength_analysis(chart: BirthChart) -> str:
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
+    response.raise_for_status()
+    data = response.json()
     text = (
         data.get("choices", [{}])[0]
         .get("message", {})
@@ -1479,7 +1507,7 @@ async def _free_strength_analysis(chart: BirthChart) -> str:
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in text
         )
-    return (text or "").strip() or "旺衰分析生成失败。"
+    return (text or "").strip() or "审判生成失败。"
 
 
 def _validate_and_fix_dayun(output: str, chart: "BirthChart") -> str:
@@ -1864,6 +1892,7 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_business_plan),
             ],
             QUESTION: [CallbackQueryHandler(receive_question)],
+            FREE_PROJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_free_project)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
