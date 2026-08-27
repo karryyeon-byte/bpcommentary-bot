@@ -1912,6 +1912,40 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ─── Free Chat Mode (subscribed users) ────────────────────────────────────
 
+async def free_chat_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photos/documents in free chat — ask for text description (no vision yet)."""
+    assert update.message is not None
+    chat_id = update.message.chat_id
+    user = db_module.get_or_create_user(chat_id)
+    if not user.is_subscribed and chat_id not in ADMIN_IDS:
+        await update.message.reply_text(
+            "未订阅用户请先支付 / Not subscribed. Please pay first:\n",
+            reply_markup=_payment_keyboard(),
+        )
+        return
+    caption = (update.message.caption or "").strip()
+    if caption:
+        # User sent image with caption — treat caption as the message
+        user_msg = caption
+        db_module.add_chat_message(chat_id, "user", f"[图片] {user_msg}")
+        history = db_module.get_chat_history(chat_id, limit=20)
+        history = history[:-1] if history else []
+        birth_chart = user.birth_chart_text or context.user_data.get("birth_chart_text", "")
+        try:
+            reply = await chat_mode.chat_reply(user_msg, history, birth_chart, lang=detect_lang(user_msg))
+        except Exception as e:
+            logger.exception("Chat mode failed")
+            reply = f"服务暂时不可用 / Service temporarily unavailable: {e}"
+        db_module.add_chat_message(chat_id, "assistant", reply)
+        for chunk in split_telegram_text(reply):
+            await update.message.reply_text(chunk)
+    else:
+        await update.message.reply_text(
+            "收到图片。目前视觉识别还在接入中，用文字描述你的产品/项目，我来审。\n"
+            "Image received. Vision support coming soon — describe your product/project in text and I'll audit it."
+        )
+
+
 async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle messages from subscribed users — free-form LLM chat."""
     assert update.message is not None
@@ -2059,6 +2093,13 @@ def main() -> None:
     application.add_handler(CommandHandler("grant", admin_grant_command))
     application.add_handler(CommandHandler("grant_single", admin_grant_single_command))
     application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart|contact_admin)"))
+    # Photo/document handler — acknowledge and ask for text description
+    application.add_handler(
+        MessageHandler(
+            (filters.PHOTO | filters.Document.ALL | filters.Document.IMAGE) & ~filters.COMMAND,
+            free_chat_media_handler,
+        )
+    )
     # Free chat handler for subscribed users (must be AFTER conversation handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_chat_handler))
 
