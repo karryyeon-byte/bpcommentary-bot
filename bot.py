@@ -248,7 +248,9 @@ Chinese section first, then English translation, same structure.
 【旺衰】一句话结论
 【用神】一句话
 【格局】一句话
-【BP】项目名｜一句话定位｜护城河：有/无
+【BP】项目名｜一句话定位
+【护城河】有/无
+【评级】S/A/B/C/D — 一句话说明为什么是这个评级
 【致命结构】2-3个bullet，每个一行
 【交叉】命要X / 项目要Y + 匹配分（模式X/10 行业X/10 团队X/10 总X/10）
 【判决】必须是 DESTINED 或 ADJUST 或 DOOMED，三选一，原样输出英文词
@@ -298,7 +300,9 @@ FEW-SHOT EXAMPLE（学习结构和语气，不要照搬内容。范例中的项�
 【旺衰】身强。火土连环，己土得根。
 【用神】庚金伤官。要自己定规则，最恨被管。
 【格局】伤官生财。
-【BP】中式国风奶茶加盟｜单店月入号称5-10万｜护城河：无｜D
+【BP】中式国风奶茶加盟｜单店月入号称5-10万
+【护城河】无
+【评级】D — 给总部交税的工位，不是品牌
 【致命结构】
 - 加盟费+管理费+原料加价，总部收税你担风险
 - 国风不是差异是标配，茶颜霸王茶姬已经把它做成基础设施
@@ -1457,7 +1461,7 @@ SINGLE TIER (50 TON) — STRIKE MODE
     if lang == "zh":
         lang_instruction = "\n================================================================================\nLANGUAGE: 全部用中文输出。处刑卡、深度处刑、所有section都用中文。只有结尾钩子保持中英双语。\n================================================================================\n"
     else:
-        lang_instruction = "\n================================================================================\nLANGUAGE: Output entirely in English. All sections — execution card, deep audit, every block — must be in English. Only the final hook stays bilingual (English + Chinese). Translate section labels: 处刑卡→EXECUTION CARD, 四柱→CHART, 旺衰→STRENGTH, 用神→FAVORABLE, 格局→PATTERN, BP→BP, 致命结构→FATAL FLAWS, 交叉→CROSSCHECK, 判决→VERDICT, 一句话→ONE LINE, 深度处刑→DEEP AUDIT, 怎么死→HOW IT DIES, 大运→LUCK CYCLES, 合伙人→CO-FOUNDERS, 融资→FUNDING, 下一刀→NEXT MOVE, 创始人评级→FOUNDER RATING.\n================================================================================\n"
+        lang_instruction = "\n================================================================================\nLANGUAGE: Output entirely in English. All sections — execution card, deep audit, every block — must be in English. Only the final hook stays bilingual (English + Chinese). Translate section labels: 处刑卡→EXECUTION CARD, 四柱→CHART, 旺衰→STRENGTH, 用神→FAVORABLE, 格局→PATTERN, BP→BP, 护城河→MOAT, 评级→GRADE, 致命结构→FATAL FLAWS, 交叉→CROSSCHECK, 判决→VERDICT, 一句话→ONE LINE, 深度处刑→DEEP AUDIT, 怎么死→HOW IT DIES, 大运→LUCK CYCLES, 合伙人→CO-FOUNDERS, 融资→FUNDING, 下一刀→NEXT MOVE, 创始人评级→FOUNDER RATING.\n================================================================================\n"
 
     full_system_prompt = SYSTEM_PROMPT + "\n" + tier_instructions + lang_instruction
 
