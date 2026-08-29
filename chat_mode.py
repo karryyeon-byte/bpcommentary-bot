@@ -9,13 +9,7 @@ from __future__ import annotations
 import os
 from typing import Final
 
-import httpx
-
-TOGETHER_API_KEY: Final[str] = os.getenv("TOGETHER_API_KEY", "").strip()
-TOGETHER_API_URL: Final[str] = "https://api.together.xyz/v1/chat/completions"
-TOGETHER_MODEL: Final[str] = os.getenv(
-    "TOGETHER_MODEL", "deepseek-ai/DeepSeek-V3"
-).strip()
+import llm_client
 
 CHAT_SYSTEM_PROMPT: Final[str] = """You are BPC (BP-Censure), 终极审计官.
 The user is a paid subscriber (200 TON/month) with unlimited chat access.
@@ -84,29 +78,5 @@ async def chat_reply(
     messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
-    payload = {
-        "model": TOGETHER_MODEL,
-        "max_tokens": 4096,
-        "messages": messages,
-    }
-    headers = {
-        "Authorization": f"Bearer {TOGETHER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-    text = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-    )
-    if isinstance(text, list):
-        text = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in text
-        )
-    return (text or "").strip() or "No response generated."
+    text = await llm_client.chat_completion(messages, max_tokens=8192, timeout=90.0)
+    return text or "No response generated."
