@@ -40,6 +40,7 @@ import db as db_module
 import ton_payment
 import chat_mode
 import file_parser
+import llm_client
 
 load_dotenv()
 db_module.init_db()
@@ -1443,7 +1444,7 @@ SUBSCRIPTION TIER (200 TON/月) — DEEP MODE
 
 6. 不要在报告结尾加"追问钩子""追问1/2/3"。报告写完即止。
 """
-        max_tokens = 16384
+        max_tokens = 24576
     else:
         tier_instructions = """
 ================================================================================
@@ -1462,7 +1463,7 @@ SINGLE TIER (50 TON) — STRIKE MODE
    "⚡ 包月对话（200 TON/月）可深挖流年窗口、合伙人匹配、融资节奏、竞品反杀。发送 /subscribe。"
    （英文："⚡ Monthly subscription (200 TON/month) unlocks deep follow-ups on timing, co-founders, funding, competition. Send /subscribe."）
 """
-        max_tokens = 8192
+        max_tokens = 12288
 
     # Language instruction
     if lang == "zh":
@@ -1472,34 +1473,12 @@ SINGLE TIER (50 TON) — STRIKE MODE
 
     full_system_prompt = SYSTEM_PROMPT + "\n" + tier_instructions + lang_instruction
 
-    payload = {
-        "model": TOGETHER_MODEL,
-        "max_tokens": max_tokens,
-        "messages": [
-            {"role": "system", "content": full_system_prompt},
-            {"role": "user", "content": build_user_prompt(chart, business_plan, question_key)},
-        ],
-    }
-    headers = {
-        "Authorization": f"Bearer {TOGETHER_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    messages = [
+        {"role": "system", "content": full_system_prompt},
+        {"role": "user", "content": build_user_prompt(chart, business_plan, question_key)},
+    ]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-    text = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-    )
-    if isinstance(text, list):
-        text = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part) for part in text
-        )
-    text = (text or "").strip()
+    text = await llm_client.chat_completion(messages, max_tokens=max_tokens, timeout=120.0)
     return text or "No commentary was returned. / 未返回点评内容。"
 
 
@@ -1608,30 +1587,8 @@ async def _free_judgment(chart: BirthChart, project: str, lang: str = "en") -> s
             ),
         },
     ]
-    payload = {
-        "model": TOGETHER_MODEL,
-        "max_tokens": 512,
-        "messages": messages,
-    }
-    headers = {
-        "Authorization": f"Bearer {TOGETHER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(TOGETHER_API_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    text = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-    )
-    if isinstance(text, list):
-        text = "".join(
-            part.get("text", "") if isinstance(part, dict) else str(part)
-            for part in text
-        )
-    return (text or "").strip() or "审判生成失败。"
+    text = await llm_client.chat_completion(messages, max_tokens=2048, timeout=60.0)
+    return text or "审判生成失败。"
 
 
 def _strip_soft_language(output: str) -> str:
