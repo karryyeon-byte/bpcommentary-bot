@@ -1501,7 +1501,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "/status — check your subscription\n"
             "/clear — clear chat history\n"
             "/cancel — stop current flow\n"
-            "/help — this message\n\n"
+            "/help — this message\n"
+            "/stats — admin user/revenue dashboard (admin only)\n\n"
             "Subscribed users: chat freely. Non-subscribers: pay per analysis or subscribe."
         )
 
@@ -1552,6 +1553,35 @@ async def admin_grant_single_command(update: Update, context: ContextTypes.DEFAU
     await update.message.reply_text(
         f"✅ 已授予单次锐评 / Single audit granted: {target_id}"
     )
+
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin only: /stats — user/revenue dashboard from our own SQLite DB."""
+    if not update.message or update.message.chat_id not in ADMIN_IDS:
+        if update.message:
+            await update.message.reply_text("无权使用 / Admin only.")
+        return
+    s = db_module.get_stats()
+    text = (
+        "📊 BPC 数据面板 / Stats\n"
+        "──────────\n"
+        f"总用户 Total users: {s['total_users']}\n"
+        f"今日新增 New today: {s['new_today']} ｜近7天 7d: {s['new_7d']}\n"
+        f"日活 DAU: {s['dau']} ｜周活 WAU: {s['wau']} ｜对话活跃 chat-DAU: {s['chat_dau']}\n"
+        f"已排盘 Charts saved: {s['with_chart']}\n"
+        f"累计分析 Audits delivered: {s['total_analyses']}\n"
+        "──────────\n"
+        f"订阅生效中 Active subs: {s['active_subs']}\n"
+        f"持单次解锁 Single unlocks: {s['single_unlocks']}\n"
+        f"付费用户 Paying users: {s['paying_users']}\n"
+        "──────────\n"
+        f"已确认收款 Confirmed: {s['confirmed_count']} 笔 / {s['confirmed_ton']:.2f} TON\n"
+        f"用户侧累计入账 Sum per user: {s['total_ton_users']:.2f} TON\n"
+        f"待支付订单 Pending orders: {s['pending_count']}\n"
+        "──────────\n"
+        "口径：只统计 /start 过本 bot 的人，Telegram 不提供 bot 粉丝数接口。"
+    )
+    await update.message.reply_text(text)
 
 
 # ─── Free Tier: 100-word sharp judgment ────────────────────────────────────
@@ -2049,6 +2079,7 @@ def main() -> None:
     application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("grant", admin_grant_command))
     application.add_handler(CommandHandler("grant_single", admin_grant_single_command))
+    application.add_handler(CommandHandler("stats", admin_stats_command))
     application.add_handler(CallbackQueryHandler(payment_callback, pattern="^(pay_|free_chart|contact_admin)"))
     # Photo/document handler — acknowledge and ask for text description
     application.add_handler(

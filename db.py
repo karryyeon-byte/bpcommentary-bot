@@ -10,12 +10,16 @@ import string
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 DB_PATH = Path(__file__).resolve().parent / "bpc.db"
 
 MEMO_ALPHABET = string.ascii_uppercase + string.digits
+
+# Stats use Shanghai calendar day (UTC+8), independent of server timezone.
+SH_TZ = timezone(timedelta(hours=8))
 
 
 @contextmanager
@@ -88,6 +92,7 @@ def init_db() -> None:
         _ensure_column(conn, "users", "expiry_date", "INTEGER DEFAULT 0")
         _ensure_column(conn, "users", "single_unlock", "INTEGER DEFAULT 0")
         _ensure_column(conn, "users", "birth_chart_text", "TEXT DEFAULT ''")
+        _ensure_column(conn, "users", "last_seen_at", "INTEGER DEFAULT 0")
         _ensure_column(conn, "payments", "payment_memo", "TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_memo "
@@ -100,6 +105,10 @@ def init_db() -> None:
         conn.execute(
             "UPDATE payments SET payment_memo = order_id "
             "WHERE payment_memo IS NULL OR payment_memo = ''"
+        )
+        # Backfill last_seen_at for legacy rows so DAU is not zero on first deploy.
+        conn.execute(
+            "UPDATE users SET last_seen_at = created_at WHERE IFNULL(last_seen_at, 0) = 0"
         )
 
 
@@ -115,6 +124,7 @@ class User:
     expiry_date: int = 0
     single_unlock: int = 0
     birth_chart_text: str = ""
+    last_seen_at: int = 0
 
     @property
     def is_subscribed(self) -> bool:
@@ -150,6 +160,7 @@ def _user_from_row(row: sqlite3.Row) -> User:
         expiry_date=data.get("expiry_date") or 0,
         single_unlock=data.get("single_unlock") or 0,
         birth_chart_text=data.get("birth_chart_text") or "",
+        last_seen_at=data.get("last_seen_at") or 0,
     )
 
 
@@ -159,10 +170,26 @@ def get_or_create_user(chat_id: int, username: str = "", first_name: str = "") -
         row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO users (chat_id, username, first_name, created_at) VALUES (?, ?, ?, ?)",
-                (chat_id, username, first_name, now),
+                "INSERT INTO users (chat_id, username, first_name, created_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (chat_id, username, first_name, now, now),
             )
-            row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+        else:
+            # Touch activity on every interaction; refresh names only when provided
+            # (some call sites pass only chat_id).
+            conn.execute(
+                "UPDATE users SET last_seen_at = ? WHERE chat_id = ?",
+                (now, chat_id),
+            )
+            if username or first_name:
+                conn.execute(
+                    "UPDATE users SET "
+                    "username = COALESCE(NULLIF(?, ''), username), "
+                    "first_name = COALESCE(NULLIF(?, ''), first_name) "
+                    "WHERE chat_id = ?",
+                    (username, first_name, chat_id),
+                )
+        row = conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
         return _user_from_row(row)
 
 
@@ -363,3 +390,90 @@ def get_chat_history(chat_id: int, limit: int = 20) -> list[dict]:
 def clear_chat_history(chat_id: int) -> None:
     with get_db() as conn:
         conn.execute("DELETE FROM chat_history WHERE chat_id = ?", (chat_id,))
+
+
+def _shanghai_day_start_ts(now_ts: Optional[int] = None) -> int:
+    """Start of the current Shanghai calendar day, as a unix timestamp."""
+    now_dt = datetime.fromtimestamp(now_ts or time.time(), tz=SH_TZ)
+    start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp())
+
+
+def get_stats() -> dict:
+    """
+    Aggregate dashboard numbers for the admin /stats command.
+    Telegram bots have no follower API — every count here comes from our own DB,
+    which only records users who have pressed /start (or otherwise hit the bot).
+    """
+    now = int(time.time())
+    day_ago = now - 86400
+    week_ago = now - 7 * 86400
+    day_start = _shanghai_day_start_ts(now)
+
+    with get_db() as conn:
+        def scalar(sql: str, args: tuple = ()):
+            row = conn.execute(sql, args).fetchone()
+            return row[0] if row and row[0] is not None else 0
+
+        total_users = scalar("SELECT COUNT(*) FROM users")
+        new_today = scalar(
+            "SELECT COUNT(*) FROM users WHERE created_at >= ?", (day_start,)
+        )
+        new_7d = scalar(
+            "SELECT COUNT(*) FROM users WHERE created_at >= ?", (week_ago,)
+        )
+        # Active = touched the bot in the window (last_seen_at updated on every call)
+        dau = scalar("SELECT COUNT(*) FROM users WHERE last_seen_at >= ?", (day_ago,))
+        wau = scalar("SELECT COUNT(*) FROM users WHERE last_seen_at >= ?", (week_ago,))
+        active_subs = scalar(
+            "SELECT COUNT(*) FROM users WHERE "
+            "MAX(IFNULL(expiry_date, 0), IFNULL(subscription_expires_at, 0)) > ?",
+            (now,),
+        )
+        single_unlocks = scalar(
+            "SELECT COUNT(*) FROM users WHERE IFNULL(single_unlock, 0) > 0"
+        )
+        paying_users = scalar(
+            "SELECT COUNT(*) FROM users WHERE IFNULL(total_paid_ton, 0) > 0"
+        )
+        total_ton_users = scalar(
+            "SELECT COALESCE(SUM(total_paid_ton), 0) FROM users"
+        )
+        total_analyses = scalar(
+            "SELECT COALESCE(SUM(analysis_count), 0) FROM users"
+        )
+        with_chart = scalar(
+            "SELECT COUNT(*) FROM users WHERE IFNULL(birth_chart_text, '') <> ''"
+        )
+        confirmed_count = scalar(
+            "SELECT COUNT(*) FROM payments WHERE status = 'confirmed'"
+        )
+        confirmed_ton = scalar(
+            "SELECT COALESCE(SUM(amount_ton), 0) FROM payments WHERE status = 'confirmed'"
+        )
+        pending_count = scalar(
+            "SELECT COUNT(*) FROM payments WHERE status = 'pending'"
+        )
+        # Chat-active users (subscribed free chat writes chat_history)
+        chat_dau = scalar(
+            "SELECT COUNT(DISTINCT chat_id) FROM chat_history WHERE created_at >= ?",
+            (day_ago,),
+        )
+
+    return {
+        "total_users": total_users,
+        "new_today": new_today,
+        "new_7d": new_7d,
+        "dau": dau,
+        "wau": wau,
+        "chat_dau": chat_dau,
+        "active_subs": active_subs,
+        "single_unlocks": single_unlocks,
+        "paying_users": paying_users,
+        "total_ton_users": float(total_ton_users),
+        "confirmed_count": confirmed_count,
+        "confirmed_ton": float(confirmed_ton),
+        "pending_count": pending_count,
+        "total_analyses": total_analyses,
+        "with_chart": with_chart,
+    }
