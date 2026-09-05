@@ -68,7 +68,8 @@ ADMIN_CONTACT_URL: Final[str] = os.getenv(
     "ADMIN_CONTACT_URL", "https://t.me/BPCommentary"
 ).strip()
 ADMIN_WECHAT: Final[str] = os.getenv("ADMIN_WECHAT", "BDR_Gerard137").strip()
-ALIPAY_QR_PATH: Final[str] = os.path.join(os.path.dirname(__file__), "alipay_qr.jpg")
+ALIPAY_QR_PATH: Final[str] = os.path.join(os.path.dirname(__file__), "alipay_qr.png")
+WECHAT_QR_PATH: Final[str] = os.path.join(os.path.dirname(__file__), "wechat_qr.png")
 
 BIRTH, BUSINESS_PLAN, QUESTION, FREE_PROJECT = range(4)
 
@@ -2020,15 +2021,21 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"• 单次锐评: ¥350 / 50 USDT\n"
             f"• 包月对话: ¥1500 / 200 USDT/月\n\n"
             "转账后截图发客服，手动开通。\n"
-            "支付宝扫码↓"
+            "微信、支付宝扫码↓（两张）"
         )
         if query.message:
             await query.message.reply_text(msg)
-            try:
-                with open(ALIPAY_QR_PATH, "rb") as photo:
-                    await context.bot.send_photo(chat_id=chat_id, photo=photo)
-            except FileNotFoundError:
-                await query.message.reply_text("(支付宝二维码未配置)")
+            for _qr_path, _qr_label in (
+                (WECHAT_QR_PATH, "微信 WeChat Pay"),
+                (ALIPAY_QR_PATH, "支付宝 Alipay"),
+            ):
+                try:
+                    with open(_qr_path, "rb") as photo:
+                        await context.bot.send_photo(
+                            chat_id=chat_id, photo=photo, caption=_qr_label
+                        )
+                except FileNotFoundError:
+                    await query.message.reply_text(f"({_qr_label}二维码未配置)")
         return
 
 
